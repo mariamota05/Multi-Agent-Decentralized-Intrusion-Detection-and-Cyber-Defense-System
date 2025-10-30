@@ -1,47 +1,67 @@
-# ...existing code...
 import asyncio
-import logging
 import spade
-from computer import ComputerAgent
-from router import RouterAgent
-from firewall import FirewallAgent
+import time
+
+# Importe *todas* as suas classes de agente
+from detection_agent import DetectionAgent
+from monitoring_agent import MonitoringAgent
+from firewall_agent import FirewallAgent  # (Novo)
+from router_agent import RouterAgent  # (Novo)
+from incident_response_agent import IncidentResponseAgent  # (Novo)
+from attacker_agent import AttackerAgent  # (O seu simulador de ataque)
 
 
 async def main():
-    print("Starting environment with Router, Firewall, and Computer agents")
+    print("Iniciando ambiente completo de Ciberdefesa Multi-Agente...")
 
-    router = RouterAgent("router@localhost", "router_password")
-    firewall = FirewallAgent("firewall@localhost", "firewall_password")
-    computer = ComputerAgent("computer@localhost", "computer_password")
+    # Lista de agentes a iniciar
+    agents_to_start = [
+        ("detector1@localhost", "password", DetectionAgent),
+        ("monitor@localhost", "password", MonitoringAgent),
+        ("firewall@localhost", "password", FirewallAgent),
+        ("router@localhost", "password", RouterAgent),
+        ("incident-response@localhost", "password", IncidentResponseAgent),
+        ("attacker@localhost", "password", AttackerAgent)
+    ]
 
-    print("Starting Router and Firewall agents...")
+    agents = []
+
+    print("Iniciando agentes de defesa (Monitor, Firewall, Router, Response)...")
+    for jid, pwd, AgentClass in agents_to_start:
+        if AgentClass != AttackerAgent:  # Inicia o atacante por último
+            agent = AgentClass(jid, pwd)
+            await agent.start(auto_register=True)
+            agents.append(agent)
+            print(f"Agente {jid} iniciado.")
+            await asyncio.sleep(0.5)
+
+    print("\nIniciando Agente Atacante...")
+    attacker = AttackerAgent("attacker@localhost", "password")
+    await attacker.start(auto_register=True)
+    agents.append(attacker)
+    print("Agente attacker@localhost iniciado. O cenário de ataque começou.\n")
+
+    print("--- Simulação a decorrer --- (Pressione Ctrl+C para parar)")
+
     try:
-        # add short timeouts so a failed connection raises instead of hanging forever
-        await asyncio.wait_for(router.start(auto_register=True), timeout=10)
-        await asyncio.wait_for(firewall.start(auto_register=True), timeout=10)
-    except Exception as e:
-        print("Error starting router/firewall:", e)
-        return
+        while True:
+            await asyncio.sleep(10)
+            # (Opcional) Pode imprimir o estado aqui, ex: firewall.blocklist
+    except KeyboardInterrupt:
+        print("\n--- Desligando simulação ---")
 
-    # short delay to ensure registration with XMPP server
-    await asyncio.sleep(1.0)
+    for agent in agents:
+        try:
+            if agent.is_alive():
+                print(f"Parando {agent.name}...")
+                await agent.stop()
+        except Exception as e:
+            print(f"Erro ao parar {agent.name}: {e}")
 
-    print("Starting Computer agent...")
-    try:
-        await asyncio.wait_for(computer.start(auto_register=True), timeout=10)
-    except Exception as e:
-        print("Error starting computer:", e)
-        await router.stop()
-        await firewall.stop()
-        return
+    print("Ambiente finalizado.")
 
-    print("All agents started. Waiting for computer to finish...")
-    await spade.wait_until_finished(computer)
-
-    await router.stop()
-    await firewall.stop()
-    print("Environment finished")
-# ...existing code...
 
 if __name__ == "__main__":
+    # Certifique-se que tem um servidor XMPP a correr!
+    # (ex: `docker run -p 5222:5222 -p 5269:5269 -p 5280:5280 prosody/prosody`)
     spade.run(main())
