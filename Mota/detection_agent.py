@@ -1,12 +1,8 @@
-import spade
-import random
-import asyncio
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour, FSMBehaviour, State
+from spade.behaviour import FSMBehaviour, State
 from spade.message import Message
-from spade.template import Template
 
-# --- Estados da FSM (Máquina de Estados Finitos) ---
+# --- Estados da FSM
 STATE_MONITORING = "MONITORING"
 STATE_ALERTING = "ALERTING"
 STATE_WAITING = "WAITING"
@@ -116,11 +112,3 @@ class DetectionAgent(Agent):
         fsm.add_transition(source=STATE_WAITING, dest=STATE_MONITORING)
 
         self.add_behaviour(fsm)
-
-# --- Para testar este agente individualmente ---
-# async def main():
-#     agent = DetectionAgent("detector1@localhost", "password")
-#     await agent.start(auto_register=True)
-#     await spade.wait_until_finished(agent)
-# if __name__ == "__main__":
-#     spade.run(main())

@@ -1,9 +1,8 @@
-import spade
 import asyncio
-import random # (Importe este também, está a faltar no seu ficheiro original)
+import random
 from spade.agent import Agent
 from spade.behaviour import FSMBehaviour, State
-from spade.message import Message  # <-- AQUI ESTÁ A CORREÇÃO
+from spade.message import Message
 
 # Estados do Atacante
 STATE_STEALTH = "STEALTH"
