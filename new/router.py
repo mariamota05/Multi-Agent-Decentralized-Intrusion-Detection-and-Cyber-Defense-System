@@ -27,7 +27,7 @@ from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 
-from .firewall import RouterFirewallBehaviour
+from firewall import RouterFirewallBehaviour
 
 
 class RouterAgent(Agent):

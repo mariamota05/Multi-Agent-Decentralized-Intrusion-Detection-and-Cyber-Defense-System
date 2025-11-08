@@ -120,6 +120,69 @@ class FirewallBehaviour(CyclicBehaviour):
 		await self.send(msg)
 		return True
 
+	async def _handle_control(self, msg: Message):
+		"""Process an incoming control message to update rules.
+
+		Control messages must have protocol 'firewall-control' and body with one of
+		the supported commands.
+		"""
+		body = (msg.body or "").strip()
+		reply = Message(to=str(msg.sender))
+		reply.set_metadata("protocol", "firewall-control")
+
+		if body.upper().startswith("BLOCK_JID:"):
+			jid = body.split(":", 1)[1].strip()
+			self.block_jid(jid)
+			reply.body = f"OK BLOCKED {jid}"
+			await self.send(reply)
+			return
+
+		if body.upper().startswith("UNBLOCK_JID:"):
+			jid = body.split(":", 1)[1].strip()
+			self.unblock_jid(jid)
+			reply.body = f"OK UNBLOCKED {jid}"
+			await self.send(reply)
+			return
+
+		if body.upper().startswith("BLOCK_KEY:"):
+			kw = body.split(":", 1)[1].strip()
+			self.block_keyword(kw)
+			reply.body = f"OK BLOCKED_KEY {kw}"
+			await self.send(reply)
+			return
+
+		if body.upper().startswith("UNBLOCK_KEY:"):
+			kw = body.split(":", 1)[1].strip()
+			self.unblock_keyword(kw)
+			reply.body = f"OK UNBLOCKED_KEY {kw}"
+			await self.send(reply)
+			return
+
+		if body.upper() == "LIST":
+			lines = ["BLOCKED_JIDS:"] + list(self.blocked_jids) + ["BLOCKED_KEYWORDS:"] + list(self.blocked_keywords)
+			reply.body = "\n".join(lines)
+			await self.send(reply)
+			return
+
+		# Unknown command
+		reply.body = "ERROR Unknown firewall command"
+		await self.send(reply)
+
+
+	async def run(self):
+		# Listen for incoming control messages and reply; otherwise idle
+		msg = await self.receive(timeout=1)
+		if msg:
+			# Control messages are those explicitly labeled; others are ignored by firewall
+			proto = msg.metadata.get("protocol") if msg.metadata else None
+			if proto == "firewall-control":
+				await self._handle_control(msg)
+			else:
+				# not a control message — the firewall doesn't 'deliver' messages to the
+				# agent by itself; NodeAgent's RecvBehav will receive messages. The
+				# firewall can be used proactively for sending and for runtime rule updates.
+				pass
+
 
 class RouterFirewallBehaviour(FirewallBehaviour):
 	"""Firewall behaviour specialised for routers.
@@ -187,65 +250,4 @@ class RouterFirewallBehaviour(FirewallBehaviour):
 		await self.send(msg)
 		return True
 
-	async def _handle_control(self, msg: Message):
-		"""Process an incoming control message to update rules.
-
-		Control messages must have protocol 'firewall-control' and body with one of
-		the supported commands.
-		"""
-		body = (msg.body or "").strip()
-		reply = Message(to=str(msg.sender))
-		reply.set_metadata("protocol", "firewall-control")
-
-		if body.upper().startswith("BLOCK_JID:"):
-			jid = body.split(":", 1)[1].strip()
-			self.block_jid(jid)
-			reply.body = f"OK BLOCKED {jid}"
-			await self.send(reply)
-			return
-
-		if body.upper().startswith("UNBLOCK_JID:"):
-			jid = body.split(":", 1)[1].strip()
-			self.unblock_jid(jid)
-			reply.body = f"OK UNBLOCKED {jid}"
-			await self.send(reply)
-			return
-
-		if body.upper().startswith("BLOCK_KEY:"):
-			kw = body.split(":", 1)[1].strip()
-			self.block_keyword(kw)
-			reply.body = f"OK BLOCKED_KEY {kw}"
-			await self.send(reply)
-			return
-
-		if body.upper().startswith("UNBLOCK_KEY:"):
-			kw = body.split(":", 1)[1].strip()
-			self.unblock_keyword(kw)
-			reply.body = f"OK UNBLOCKED_KEY {kw}"
-			await self.send(reply)
-			return
-
-		if body.upper() == "LIST":
-			lines = ["BLOCKED_JIDS:"] + list(self.blocked_jids) + ["BLOCKED_KEYWORDS:"] + list(self.blocked_keywords)
-			reply.body = "\n".join(lines)
-			await self.send(reply)
-			return
-
-		# Unknown command
-		reply.body = "ERROR Unknown firewall command"
-		await self.send(reply)
-
-	async def run(self):
-		# Listen for incoming control messages and reply; otherwise idle
-		msg = await self.receive(timeout=1)
-		if msg:
-			# Control messages are those explicitly labeled; others are ignored by firewall
-			proto = msg.metadata.get("protocol") if msg.metadata else None
-			if proto == "firewall-control":
-				await self._handle_control(msg)
-			else:
-				# not a control message — the firewall doesn't 'deliver' messages to the
-				# agent by itself; NodeAgent's RecvBehav will receive messages. The
-				# firewall can be used proactively for sending and for runtime rule updates.
-				pass
 

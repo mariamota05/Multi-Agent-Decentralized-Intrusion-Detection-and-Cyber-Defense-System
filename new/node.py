@@ -27,7 +27,7 @@ import spade
 from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour, PeriodicBehaviour
 from spade.message import Message
-from .firewall import FirewallBehaviour
+from firewall import FirewallBehaviour
 
 
 # Note: the user requested no XMPP server probe. SPADE is expected to be
