@@ -20,11 +20,15 @@ import argparse
 import asyncio
 import datetime
 import getpass
-from typing import Dict, Set
+from typing import Dict, Set, List, Any
+import json
+from spade.behaviour import CyclicBehaviour
+from spade.behaviour import OneShotBehaviour
+from spade.template import Template
+import time
 
 import spade
 from spade.agent import Agent
-from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 
 from firewall import RouterFirewallBehaviour
@@ -157,14 +161,150 @@ class RouterAgent(Agent):
 		# mark role so firewall can behave differently (router bypasses intra-subnet checks)
 		self.set("role", "router")
 
-		# initialize routing structures
-		self.set("routing_table", {})
-		self.set("local_nodes", set())
-		self.set("monitor_jids", [])
-		self.set("internal_monitor_jids", [])
+		# initialize routing structures but only set defaults if not already configured
+		if not self.get("routing_table"):
+			self.set("routing_table", {})
+		if not self.get("local_nodes"):
+			self.set("local_nodes", set())
+		if not self.get("monitor_jids"):
+			self.set("monitor_jids", [])
+		if not self.get("internal_monitor_jids"):
+			self.set("internal_monitor_jids", [])
+
+		# Print current configuration for visibility when the router starts
+		rt = self.get("routing_table") or {}
+		ln = self.get("local_nodes") or set()
+		monitors = self.get("monitor_jids") or []
+		internal = self.get("internal_monitor_jids") or []
+		print(f"Router {str(self.jid)} configuration:")
+		print(f"  local_nodes: {sorted(list(ln))}")
+		print(f"  routing_table: {rt}")
+		print(f"  monitors: {monitors}, internal_monitors: {internal}")
 
 		# add main router behaviour
 		self.add_behaviour(self.RouterBehav())
+
+	# CNP manager behaviour: runs a single CNP round (CFP -> collect PROPOSE -> accept/reject -> wait INFORM)
+	class CNPManagerBehav(OneShotBehaviour):
+		def __init__(self, task_id: str, task: dict, targets: List[str], proposal_timeout: float, inform_timeout: float, result_future: Any, *args, **kwargs):
+			super().__init__(*args, **kwargs)
+			self.task_id = task_id
+			self.task = task
+			self.targets = targets
+			self.proposal_timeout = proposal_timeout
+			self.inform_timeout = inform_timeout
+			self.result_future = result_future
+
+		async def run(self):
+			fw = self.agent.get("firewall")
+			# build CFP body
+			cfp = {"protocol": "cnp", "type": "CFP", "task_id": self.task_id, "task": self.task}
+			# send CFP to targets via firewall helper when available
+			for t in self.targets:
+				body = json.dumps(cfp)
+				if fw:
+					try:
+						await fw.send_through_firewall(t, body, metadata={"protocol": "cnp"})
+					except Exception:
+						pass
+				else:
+					m = Message(to=t)
+					m.set_metadata("protocol", "cnp")
+					m.body = body
+					await self.send(m)
+
+			print(f"Sent CFP {self.task_id} to {len(self.targets)} targets; waiting {self.proposal_timeout}s for proposals")
+
+			# collect proposals until timeout
+			proposals = []
+			end = time.time() + self.proposal_timeout
+			while time.time() < end:
+				remaining = end - time.time()
+				msg = await self.receive(timeout=min(0.5, remaining))
+				if not msg:
+					continue
+				# try parse body JSON
+				try:
+					parsed = json.loads(str(msg.body))
+				except Exception:
+					parsed = None
+				if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp" and parsed.get("type") == "PROPOSE" and parsed.get("task_id") == self.task_id:
+					proposal = parsed.get("proposal")
+					proposals.append({"from": str(msg.sender), "proposal": proposal})
+					print(f"Manager stored proposal from {msg.sender}: {proposal}")
+
+			print(f"Collected {len(proposals)} proposals for {self.task_id}")
+
+			if not proposals:
+				print(f"No proposals received for {self.task_id}; aborting CNP")
+				self.result_future.set_result(None)
+				return
+
+			# choose best: highest avail_cpu
+			best = None
+			best_score = -1
+			for p in proposals:
+				pr = p.get("proposal") or {}
+				avail = float(pr.get("avail_cpu", 0.0))
+				if avail > best_score:
+					best_score = avail
+					best = p
+
+			winner = best.get("from")
+			# send ACCEPT to winner, REJECT to others
+			for p in proposals:
+				dest = p.get("from")
+				if dest == winner:
+					body = json.dumps({"protocol": "cnp", "type": "ACCEPT_PROPOSAL", "task_id": self.task_id, "task": self.task})
+					if fw:
+						await fw.send_through_firewall(dest, body, metadata={"protocol": "cnp"})
+					else:
+						m = Message(to=dest)
+						m.set_metadata("protocol", "cnp")
+						m.body = body
+						await self.send(m)
+				else:
+					body = json.dumps({"protocol": "cnp", "type": "REJECT_PROPOSAL", "task_id": self.task_id})
+					if fw:
+						await fw.send_through_firewall(dest, body, metadata={"protocol": "cnp"})
+					else:
+						m = Message(to=dest)
+						m.set_metadata("protocol", "cnp")
+						m.body = body
+						await self.send(m)
+
+			print(f"Accepted proposal from {winner} for task {self.task_id}; waiting up to {self.inform_timeout}s for INFORM")
+
+			# wait for INFORM
+			end2 = time.time() + self.inform_timeout
+			informed = False
+			while time.time() < end2:
+				remaining = end2 - time.time()
+				msg = await self.receive(timeout=min(0.5, remaining))
+				if not msg:
+					continue
+				try:
+					parsed = json.loads(str(msg.body))
+				except Exception:
+					parsed = None
+				if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp" and parsed.get("type") == "INFORM" and parsed.get("task_id") == self.task_id:
+					print(f"Received INFORM for {self.task_id}: {parsed}")
+					informed = True
+					break
+
+			if not informed:
+				print(f"Did not receive INFORM for {self.task_id} within timeout")
+			# set result and finish
+			self.result_future.set_result(informed)
+
+	# Router-level helper to start a CNP round. Returns True if INFORM received, None if aborted
+	async def start_cnp(self, task_id: str, task: dict, targets: List[str], proposal_timeout: float = 2.0, inform_timeout: float = 4.0):
+		loop = asyncio.get_event_loop()
+		fut = loop.create_future()
+		beh = self.CNPManagerBehav(task_id, task, targets, proposal_timeout, inform_timeout, fut)
+		self.add_behaviour(beh)
+		result = await fut
+		return result
 
 	# convenience helpers for runtime configuration
 	def add_route(self, dst_pattern: str, next_hop: str):
@@ -176,6 +316,8 @@ class RouterAgent(Agent):
 		ln = self.get("local_nodes") or set()
 		ln.add(jid)
 		self.set("local_nodes", ln)
+		# log when a node connects to this router
+		print(f"Router {str(self.jid)}: node {jid} connected; local_nodes now: {sorted(list(ln))}")
 
 	def add_internal_monitor(self, jid: str):
 		ims = self.get("internal_monitor_jids") or []

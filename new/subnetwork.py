@@ -78,6 +78,15 @@ async def run_subnetwork(domain: str, password: str, run_seconds: int = 6):
         await node1.send(msg)
         print("node1->router sent raw message (no firewall)")
 
+    # Demonstrate a simple Contract Net Protocol round: ask the router to coordinate
+    task = {"duration": 2.0, "cpu_load": 15.0}
+    print("Router initiating CNP task t1 -> node2 (manager at router)")
+    try:
+        informed = await router.start_cnp("t1", task, [node2_jid], proposal_timeout=1.5, inform_timeout=4.0)
+        print(f"CNP completed; informed={informed}")
+    except Exception as e:
+        print(f"CNP initiation failed: {e}")
+
     # Wait to allow routing and monitoring to process
     await asyncio.sleep(run_seconds)
 
@@ -110,15 +119,3 @@ if __name__ == "__main__":
     main()
 
 
-'''PS C:\Users\galma\Documents\Universidade\3_ano\1_semestre\Sistemas\new> python .\subnetwork.py
-MonitoringAgent monitor@localhost starting...
-Monitoring behaviour started
-RouterAgent router@localhost starting...
-NodeAgent node1@localhost starting...
-NodeAgent node2@localhost starting...
-All agents started. Sending test message from node1 -> node2 via router...
-node1->router send_through_firewall returned True
-[01:27:34.040434] Router router@localhost received msg from node1@localhost
-No route for node2@localhost; dropping packet
-Stopping agents...
-PS C:\Users\galma\Documents\Universidade\3_ano\1_semestre\Sistemas\new>'''

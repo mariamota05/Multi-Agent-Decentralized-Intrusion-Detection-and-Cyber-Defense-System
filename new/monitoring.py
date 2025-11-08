@@ -76,6 +76,9 @@ class MonitoringAgent(Agent):
             sender = str(msg.sender) if msg.sender else "unknown"
             body = (msg.body or "").lower()
 
+            # Informational log: monitoring check started
+            print(f"Monitoring bot checking message from {sender}")
+
             suspicious = False
             reasons = []
 
@@ -125,6 +128,9 @@ class MonitoringAgent(Agent):
                         ctrl.body = f"BLOCK_JID:{offender}"
                         await self.send(ctrl)
                         print(f"Sent firewall-control BLOCK_JID for {offender} to {node}")
+
+            # Informational log: monitoring check completed (always log result)
+            print(f"Monitoring bot check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
 
         async def run(self):
             msg = await self.receive(timeout=1)

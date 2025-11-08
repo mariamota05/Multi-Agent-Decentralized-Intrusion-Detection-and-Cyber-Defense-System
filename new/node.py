@@ -21,6 +21,12 @@ Notes:
 import argparse
 import asyncio
 import datetime
+import json
+import random
+
+
+def _now_ts():
+    return asyncio.get_event_loop().time()
 import getpass
 
 import spade
@@ -62,8 +68,83 @@ class NodeAgent(Agent):
                 now = datetime.datetime.now().time()
                 print(f"[{now}] Received from {msg.sender}: {msg.body}")
 
-                # simple protocol handling
-                body = (msg.body or "").strip()
+                # try to parse structured JSON messages (e.g., CNP, resource reports)
+                parsed = None
+                body_text = (msg.body or "").strip()
+                try:
+                    parsed = json.loads(body_text)
+                except Exception:
+                    parsed = None
+
+                # handle structured CNP messages first
+                if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp":
+                    ctype = parsed.get("type")
+                    task_id = parsed.get("task_id")
+                    # Participant handling: CFP -> send PROPOSE
+                    if ctype == "CFP":
+                        # compute simple proposal based on available cpu and bandwidth
+                        cpu = float(self.agent.get("cpu_usage") or 0.0)
+                        bw = float(self.agent.get("bandwidth_usage") or 0.0)
+                        # higher available (inverse of usage) is better
+                        avail_cpu = max(0.0, 100.0 - cpu)
+                        avail_bw = max(0.0, 100.0 - bw)
+                        proposal = {"avail_cpu": avail_cpu, "avail_bw": avail_bw}
+                        prop_msg = Message(to=str(msg.sender))
+                        prop_msg.body = json.dumps({"protocol": "cnp", "type": "PROPOSE", "task_id": task_id, "proposal": proposal})
+                        await self.send(prop_msg)
+                        print(f"Sent PROPOSE for task {task_id} to {msg.sender}: {proposal}")
+                        # Do NOT record the proposal on the participant — proposals
+                        # must be delivered back to the manager who will collect them.
+                        return
+
+                    # Participant accepted: perform task and reply INFORM when done
+                    if ctype == "ACCEPT_PROPOSAL":
+                        task = parsed.get("task") or {}
+                        duration = float(task.get("duration", 1.0))
+                        load = float(task.get("cpu_load", 10.0))
+                        # schedule a simulated task: increase cpu usage for duration
+                        active = self.agent.get("active_tasks") or {}
+                        end_ts = _now_ts() + duration
+                        active[task_id] = {"end": end_ts, "load": load}
+                        self.agent.set("active_tasks", active)
+                        print(f"Accepted task {task_id}; executing for {duration}s (cpu load +{load})")
+
+                        # simulate work asynchronously and send INFORM when done
+                        async def _do_and_inform():
+                            await asyncio.sleep(duration)
+                            inf = Message(to=str(msg.sender))
+                            inf.body = json.dumps({"protocol": "cnp", "type": "INFORM", "task_id": task_id, "result": "done"})
+                            await self.send(inf)
+                            # cleanup active tasks
+                            active = self.agent.get("active_tasks") or {}
+                            if task_id in active:
+                                del active[task_id]
+                                self.agent.set("active_tasks", active)
+                            print(f"Completed task {task_id}; sent INFORM to {msg.sender}")
+
+                        self.agent.loop.create_task(_do_and_inform())
+                        return
+
+                    # Manager/recipient handling: PROPOSE/REJECT/INFORM should be
+                    # stored so a running manager (start_cnp) can collect them.
+                    if ctype == "PROPOSE":
+                        proposal = parsed.get("proposal")
+                        store = self.agent.get("cnp_proposals") or {}
+                        # store proposals keyed by task_id; record sender and proposal
+                        store.setdefault(task_id, []).append({"from": str(msg.sender), "proposal": proposal})
+                        self.agent.set("cnp_proposals", store)
+                        print(f"Stored PROPOSE for task {task_id} from {msg.sender}: {proposal}")
+                        return
+
+                    if ctype in ("REJECT_PROPOSAL", "INFORM"):
+                        print(f"CNP message ({ctype}) for task {task_id} received: {parsed}")
+                        cnp_store = self.agent.get("cnp_proposals") or {}
+                        cnp_store.setdefault(task_id or "_misc", []).append({"msg": parsed, "from": str(msg.sender)})
+                        self.agent.set("cnp_proposals", cnp_store)
+                        return
+
+                # simple protocol handling for legacy/plain messages
+                body = body_text
                 if body.upper() == "PING":
                     reply = Message(to=str(msg.sender))
                     reply.body = "PONG"
@@ -105,6 +186,35 @@ class NodeAgent(Agent):
             print(f"Sent heartbeat to {len(peers)} peers (count={self.counter})")
             self.counter += 1
 
+    class ResourceBehav(PeriodicBehaviour):
+        async def on_start(self):
+            # initialize active tasks store
+            self.agent.set("active_tasks", {})
+
+        async def run(self):
+            # simulate CPU and bandwidth usage: base noise plus active tasks
+            base_cpu = random.uniform(5.0, 15.0)
+            base_bw = random.uniform(2.0, 10.0)
+            active = self.agent.get("active_tasks") or {}
+            extra_cpu = 0.0
+            # remove finished tasks
+            now = _now_ts()
+            to_delete = []
+            for tid, info in list(active.items()):
+                if info.get("end", 0) <= now:
+                    to_delete.append(tid)
+                else:
+                    extra_cpu += float(info.get("load", 0.0))
+            for tid in to_delete:
+                del active[tid]
+            self.agent.set("active_tasks", active)
+
+            cpu_usage = min(100.0, base_cpu + extra_cpu)
+            bw_usage = min(100.0, base_bw + extra_cpu * 0.2)
+            self.agent.set("cpu_usage", cpu_usage)
+            self.agent.set("bandwidth_usage", bw_usage)
+            print(f"Resource update for {self.agent.jid}: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% (active_tasks={len(active)})")
+
     async def setup(self):
         print(f"NodeAgent {str(self.jid)} starting...")
         # Add firewall behaviour and store reference for other behaviours
@@ -126,8 +236,19 @@ class NodeAgent(Agent):
         # mark role so firewall can differentiate behaviour
         self.set("role", "node")
 
+        # initialize resource usage tracking and CNP store
+        self.set("cpu_usage", 5.0)
+        self.set("bandwidth_usage", 5.0)
+        self.set("cnp_proposals", {})
+
+        # resource simulation behaviour (periodic)
+        res = self.ResourceBehav(period=2)
+        self.add_behaviour(res)
+
         recv = self.RecvBehav()
         self.add_behaviour(recv)
+
+    # Node agents are participants only; CNP manager is hosted by the router.
 
 
 ## Interactive mode removed per user request; node runs non-interactively
