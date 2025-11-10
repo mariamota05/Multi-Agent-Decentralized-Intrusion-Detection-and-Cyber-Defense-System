@@ -76,6 +76,16 @@ class NodeAgent(Agent):
                 except Exception:
                     parsed = None
 
+                # handle cnp-request-response messages (router replies to node-initiated requests)
+                if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp-request-response":
+                    task_id = parsed.get("task_id")
+                    result = parsed.get("result", False)
+                    store = self.agent.get("cnp_request_results") or {}
+                    store[task_id] = result
+                    self.agent.set("cnp_request_results", store)
+                    print(f"Stored cnp-request-response for {task_id}: {result}")
+                    return
+
                 # handle structured CNP messages first
                 if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp":
                     ctype = parsed.get("type")
@@ -240,6 +250,8 @@ class NodeAgent(Agent):
         self.set("cpu_usage", 5.0)
         self.set("bandwidth_usage", 5.0)
         self.set("cnp_proposals", {})
+        # store for node-initiated CNP request results (router responses)
+        self.set("cnp_request_results", {})
 
         # resource simulation behaviour (periodic)
         res = self.ResourceBehav(period=2)

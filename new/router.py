@@ -60,8 +60,51 @@ class RouterAgent(Agent):
 					print(f"Firewall blocked inbound message from {msg.sender}")
 					return
 
-			# Determine destination
+
+			# Try to parse body JSON for special control messages (e.g., cnp-request)
 			dst = None
+			parsed = None
+			try:
+				parsed = json.loads(str(msg.body)) if msg.body else None
+			except Exception:
+				parsed = None
+
+			# If this is a CNP request from a node asking the router to run the auction,
+			# trigger the router-managed CNP and ACK the requester.
+			if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp-request":
+				requester = str(msg.sender)
+				task_id = parsed.get("task_id")
+				task = parsed.get("task") or {}
+				targets = parsed.get("targets") or list(self.agent.get("local_nodes") or [])
+
+				# Acknowledge receipt to requester
+				fw = self.agent.get("firewall")
+				ack = {"protocol": "cnp-request-response", "type": "ACK", "task_id": task_id}
+				if fw:
+					await fw.send_through_firewall(requester, json.dumps(ack), metadata={"protocol": "cnp-request-response"})
+				else:
+					mack = Message(to=requester)
+					mack.set_metadata("protocol", "cnp-request-response")
+					mack.body = json.dumps(ack)
+					await self.send(mack)
+
+				# start CNP manager in background and send result back to requester when done
+				async def _run_and_report():
+					res = await self.agent.start_cnp(task_id, task, targets)
+					report = {"protocol": "cnp-request-response", "type": "RESULT", "task_id": task_id, "result": res}
+					if fw:
+						await fw.send_through_firewall(requester, json.dumps(report), metadata={"protocol": "cnp-request-response"})
+					else:
+						mres = Message(to=requester)
+						mres.set_metadata("protocol", "cnp-request-response")
+						mres.body = json.dumps(report)
+						await self.send(mres)
+
+				# schedule background task and continue
+				asyncio.create_task(_run_and_report())
+				return
+
+			# Determine destination for normal forwarding
 			if msg.metadata and "dst" in msg.metadata:
 				dst = msg.metadata.get("dst")
 			else:
