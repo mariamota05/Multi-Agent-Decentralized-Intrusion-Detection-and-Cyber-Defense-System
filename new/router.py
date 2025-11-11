@@ -50,7 +50,7 @@ class RouterAgent(Agent):
 				return
 
 			now = datetime.datetime.now().time()
-			print(f"[{now}] Router {self.agent.jid} received msg from {msg.sender}")
+			print(f"[{now}] [Router {self.agent.jid}] received msg from {msg.sender}")
 
 			# Firewall inbound check
 			fw = self.agent.get("firewall")
@@ -70,39 +70,7 @@ class RouterAgent(Agent):
 				parsed = None
 
 			# If this is a CNP request from a node asking the router to run the auction,
-			# trigger the router-managed CNP and ACK the requester.
-			if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp-request":
-				requester = str(msg.sender)
-				task_id = parsed.get("task_id")
-				task = parsed.get("task") or {}
-				targets = parsed.get("targets") or list(self.agent.get("local_nodes") or [])
-
-				# Acknowledge receipt to requester
-				fw = self.agent.get("firewall")
-				ack = {"protocol": "cnp-request-response", "type": "ACK", "task_id": task_id}
-				if fw:
-					await fw.send_through_firewall(requester, json.dumps(ack), metadata={"protocol": "cnp-request-response"})
-				else:
-					mack = Message(to=requester)
-					mack.set_metadata("protocol", "cnp-request-response")
-					mack.body = json.dumps(ack)
-					await self.send(mack)
-
-				# start CNP manager in background and send result back to requester when done
-				async def _run_and_report():
-					res = await self.agent.start_cnp(task_id, task, targets)
-					report = {"protocol": "cnp-request-response", "type": "RESULT", "task_id": task_id, "result": res}
-					if fw:
-						await fw.send_through_firewall(requester, json.dumps(report), metadata={"protocol": "cnp-request-response"})
-					else:
-						mres = Message(to=requester)
-						mres.set_metadata("protocol", "cnp-request-response")
-						mres.body = json.dumps(report)
-						await self.send(mres)
-
-				# schedule background task and continue
-				asyncio.create_task(_run_and_report())
-				return
+			# (CNP functionality removed) normal forwarding continues
 
 			# Determine destination for normal forwarding
 			if msg.metadata and "dst" in msg.metadata:
@@ -112,7 +80,7 @@ class RouterAgent(Agent):
 				dst = str(msg.to) if msg.to else None
 
 			if not dst:
-				print("Router: message missing dst metadata; dropping")
+				print(f"[Router {self.agent.jid}] message missing dst metadata; dropping")
 				return
 
 			# Send copy to monitoring agents first (so monitor sees traffic before forwarding)
@@ -154,9 +122,9 @@ class RouterAgent(Agent):
 				if fw:
 					sent = await fw.send_through_firewall(dst, out.body, metadata={"via": str(self.agent.jid)})
 					if sent:
-						print(f"Forwarded locally to {dst}")
+						print(f"[Router {self.agent.jid}] Forwarded locally to {dst}")
 					else:
-						print(f"Firewall blocked forwarding to local {dst}")
+						print(f"[Router {self.agent.jid}] Firewall blocked forwarding to local {dst}")
 				else:
 					await self.send(out)
 					print(f"Forwarded locally to {dst}")
@@ -172,7 +140,7 @@ class RouterAgent(Agent):
 						break
 
 			if not next_hop:
-				print(f"No route for {dst}; dropping packet")
+				print(f"[Router {self.agent.jid}] No route for {dst}; dropping packet")
 				return
 
 			# Forward to next hop
@@ -189,12 +157,12 @@ class RouterAgent(Agent):
 				sent_ok = True
 
 			if sent_ok:
-				print(f"Forwarded {dst} via next hop {next_hop}")
+				print(f"[Router {self.agent.jid}] Forwarded {dst} via next hop {next_hop}")
 			else:
-				print(f"Firewall prevented forwarding to {next_hop} for dst {dst}")
+				print(f"[Router {self.agent.jid}] Firewall prevented forwarding to {next_hop} for dst {dst}")
 
 	async def setup(self):
-		print(f"RouterAgent {str(self.jid)} starting...")
+		print(f"[Router {str(self.jid)}] starting...")
 
 		# attach a router-specific firewall behaviour and store reference
 		fw = RouterFirewallBehaviour()
@@ -219,7 +187,7 @@ class RouterAgent(Agent):
 		ln = self.get("local_nodes") or set()
 		monitors = self.get("monitor_jids") or []
 		internal = self.get("internal_monitor_jids") or []
-		print(f"Router {str(self.jid)} configuration:")
+		print(f"[Router {str(self.jid)}] configuration:")
 		print(f"  local_nodes: {sorted(list(ln))}")
 		print(f"  routing_table: {rt}")
 		print(f"  monitors: {monitors}, internal_monitors: {internal}")
@@ -227,127 +195,7 @@ class RouterAgent(Agent):
 		# add main router behaviour
 		self.add_behaviour(self.RouterBehav())
 
-	# CNP manager behaviour: runs a single CNP round (CFP -> collect PROPOSE -> accept/reject -> wait INFORM)
-	class CNPManagerBehav(OneShotBehaviour):
-		def __init__(self, task_id: str, task: dict, targets: List[str], proposal_timeout: float, inform_timeout: float, result_future: Any, *args, **kwargs):
-			super().__init__(*args, **kwargs)
-			self.task_id = task_id
-			self.task = task
-			self.targets = targets
-			self.proposal_timeout = proposal_timeout
-			self.inform_timeout = inform_timeout
-			self.result_future = result_future
-
-		async def run(self):
-			fw = self.agent.get("firewall")
-			# build CFP body
-			cfp = {"protocol": "cnp", "type": "CFP", "task_id": self.task_id, "task": self.task}
-			# send CFP to targets via firewall helper when available
-			for t in self.targets:
-				body = json.dumps(cfp)
-				if fw:
-					try:
-						await fw.send_through_firewall(t, body, metadata={"protocol": "cnp"})
-					except Exception:
-						pass
-				else:
-					m = Message(to=t)
-					m.set_metadata("protocol", "cnp")
-					m.body = body
-					await self.send(m)
-
-			print(f"Sent CFP {self.task_id} to {len(self.targets)} targets; waiting {self.proposal_timeout}s for proposals")
-
-			# collect proposals until timeout
-			proposals = []
-			end = time.time() + self.proposal_timeout
-			while time.time() < end:
-				remaining = end - time.time()
-				msg = await self.receive(timeout=min(0.5, remaining))
-				if not msg:
-					continue
-				# try parse body JSON
-				try:
-					parsed = json.loads(str(msg.body))
-				except Exception:
-					parsed = None
-				if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp" and parsed.get("type") == "PROPOSE" and parsed.get("task_id") == self.task_id:
-					proposal = parsed.get("proposal")
-					proposals.append({"from": str(msg.sender), "proposal": proposal})
-					print(f"Manager stored proposal from {msg.sender}: {proposal}")
-
-			print(f"Collected {len(proposals)} proposals for {self.task_id}")
-
-			if not proposals:
-				print(f"No proposals received for {self.task_id}; aborting CNP")
-				self.result_future.set_result(None)
-				return
-
-			# choose best: highest avail_cpu
-			best = None
-			best_score = -1
-			for p in proposals:
-				pr = p.get("proposal") or {}
-				avail = float(pr.get("avail_cpu", 0.0))
-				if avail > best_score:
-					best_score = avail
-					best = p
-
-			winner = best.get("from")
-			# send ACCEPT to winner, REJECT to others
-			for p in proposals:
-				dest = p.get("from")
-				if dest == winner:
-					body = json.dumps({"protocol": "cnp", "type": "ACCEPT_PROPOSAL", "task_id": self.task_id, "task": self.task})
-					if fw:
-						await fw.send_through_firewall(dest, body, metadata={"protocol": "cnp"})
-					else:
-						m = Message(to=dest)
-						m.set_metadata("protocol", "cnp")
-						m.body = body
-						await self.send(m)
-				else:
-					body = json.dumps({"protocol": "cnp", "type": "REJECT_PROPOSAL", "task_id": self.task_id})
-					if fw:
-						await fw.send_through_firewall(dest, body, metadata={"protocol": "cnp"})
-					else:
-						m = Message(to=dest)
-						m.set_metadata("protocol", "cnp")
-						m.body = body
-						await self.send(m)
-
-			print(f"Accepted proposal from {winner} for task {self.task_id}; waiting up to {self.inform_timeout}s for INFORM")
-
-			# wait for INFORM
-			end2 = time.time() + self.inform_timeout
-			informed = False
-			while time.time() < end2:
-				remaining = end2 - time.time()
-				msg = await self.receive(timeout=min(0.5, remaining))
-				if not msg:
-					continue
-				try:
-					parsed = json.loads(str(msg.body))
-				except Exception:
-					parsed = None
-				if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp" and parsed.get("type") == "INFORM" and parsed.get("task_id") == self.task_id:
-					print(f"Received INFORM for {self.task_id}: {parsed}")
-					informed = True
-					break
-
-			if not informed:
-				print(f"Did not receive INFORM for {self.task_id} within timeout")
-			# set result and finish
-			self.result_future.set_result(informed)
-
-	# Router-level helper to start a CNP round. Returns True if INFORM received, None if aborted
-	async def start_cnp(self, task_id: str, task: dict, targets: List[str], proposal_timeout: float = 2.0, inform_timeout: float = 4.0):
-		loop = asyncio.get_event_loop()
-		fut = loop.create_future()
-		beh = self.CNPManagerBehav(task_id, task, targets, proposal_timeout, inform_timeout, fut)
-		self.add_behaviour(beh)
-		result = await fut
-		return result
+	# (CNP manager removed) router no longer implements start_cnp
 
 	# convenience helpers for runtime configuration
 	def add_route(self, dst_pattern: str, next_hop: str):
@@ -360,7 +208,7 @@ class RouterAgent(Agent):
 		ln.add(jid)
 		self.set("local_nodes", ln)
 		# log when a node connects to this router
-		print(f"Router {str(self.jid)}: node {jid} connected; local_nodes now: {sorted(list(ln))}")
+		print(f"[Router {str(self.jid)}] node {jid} connected; local_nodes now: {sorted(list(ln))}")
 
 	def add_internal_monitor(self, jid: str):
 		ims = self.get("internal_monitor_jids") or []

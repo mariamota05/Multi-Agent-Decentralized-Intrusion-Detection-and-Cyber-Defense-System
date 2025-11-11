@@ -22,7 +22,6 @@ Notes:
 import argparse
 import asyncio
 import os
-import time
 import json
 
 import spade
@@ -67,50 +66,24 @@ async def run_subnetwork(domain: str, password: str, run_seconds: int = 6):
     # Allow behaviours to initialize
     await asyncio.sleep(1)
 
-    # Node1 asks the router to coordinate a CNP round (Node1 has initiative)
-    task = {"duration": 2.0, "cpu_load": 15.0}
-    cnp_request = {"protocol": "cnp-request", "task_id": "t1", "task": task, "targets": [node2_jid]}
-    print("Node1 -> router: asking to coordinate CNP task t1 (will wait for RESULT before sending payload)")
-    try:
-        fw1 = node1.get("firewall")
-        if fw1:
-            await fw1.send_through_firewall(str(router_jid), json.dumps(cnp_request), metadata={"protocol": "cnp-request", "dst": str(router_jid)})
-        else:
-            rq = spade.message.Message(to=str(router_jid))
-            rq.set_metadata("protocol", "cnp-request")
-            rq.body = json.dumps(cnp_request)
-            await node1.send(rq)
-        print("CNP request sent from node1 to router")
-    except Exception as e:
-        print(f"CNP request failed: {e}")
-
-    # Wait for router to respond with cnp-request-response (RESULT). If accepted, send the payload.
-    timeout = 8.0
-    poll_interval = 0.25
-    elapsed = 0.0
-    accepted = False
-    while elapsed < timeout:
-        results = node1.get("cnp_request_results") or {}
-        if results.get("t1") is not None:
-            accepted = bool(results.get("t1"))
-            break
-        await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
-
-    if accepted:
-        print("Router accepted CNP request; sending payload now")
-        fw1 = node1.get("firewall")
-        if fw1:
-            sent = await fw1.send_through_firewall(str(router_jid), "Hello node2, this is node1", metadata={"dst": str(node2_jid)})
-            print(f"node1->router send_through_firewall returned {sent}")
-        else:
-            msg = spade.message.Message(to=str(router_jid))
-            msg.body = "Hello node2, this is node1"
-            msg.set_metadata("dst", str(node2_jid))
-            await node1.send(msg)
-            print("node1->router sent raw message (no firewall)")
+    # Simple forwarding test: send a message with a small task in metadata so the
+    # receiver schedules an active task and ResourceBehav reports the load.
+    task_meta = {"duration": 2.0, "cpu_load": 15.0}
+    fw1 = node1.get("firewall")
+    if fw1:
+        sent = await fw1.send_through_firewall(
+            str(router_jid),
+            "Hello node2, this is node1",
+            metadata={"dst": str(node2_jid), "task": json.dumps(task_meta)},
+        )
+        print(f"node1->router send_through_firewall returned {sent}")
     else:
-        print(f"Router did not accept or timed out after {timeout}s; not sending payload")
+        msg = spade.message.Message(to=str(router_jid))
+        msg.body = "Hello node2, this is node1"
+        msg.set_metadata("dst", str(node2_jid))
+        msg.set_metadata("task", json.dumps(task_meta))
+        await node1.send(msg)
+        print("node1->router sent raw message (no firewall)")
 
     # Wait to allow routing and monitoring to process
     await asyncio.sleep(run_seconds)

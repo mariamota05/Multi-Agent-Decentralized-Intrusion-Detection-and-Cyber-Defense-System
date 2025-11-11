@@ -69,7 +69,7 @@ class MonitoringAgent(Agent):
             ]
 
         async def on_start(self):
-            print("Monitoring behaviour started")
+            print(f"[MonitoringAgent {self.agent.jid}] Monitoring behaviour started")
 
         async def process_message(self, msg: Message):
             now = asyncio.get_event_loop().time()
@@ -77,7 +77,8 @@ class MonitoringAgent(Agent):
             body = (msg.body or "").lower()
 
             # Informational log: monitoring check started
-            print(f"Monitoring bot checking message from {sender}")
+            now_ts = datetime.datetime.now().time()
+            print(f"[{now_ts}] [MonitoringAgent {self.agent.jid}] Checking message from {sender}")
 
             suspicious = False
             reasons = []
@@ -108,7 +109,7 @@ class MonitoringAgent(Agent):
                     "body": msg.body,
                     "reasons": reasons,
                 }
-                print(f"[ALERT] {alert}")
+                print(f"[{ts}] [MonitoringAgent {self.agent.jid}] [ALERT] {alert}")
                 # notify response agent if available
                 resp_jid = self.agent.get("response_jid")
                 if resp_jid:
@@ -116,7 +117,7 @@ class MonitoringAgent(Agent):
                     m.set_metadata("protocol", "monitoring-alert")
                     m.body = f"ALERT {alert}"
                     await self.send(m)
-                    print(f"Sent alert to response agent {resp_jid}")
+                    print(f"[{datetime.datetime.now().time()}] [MonitoringAgent {self.agent.jid}] Sent alert to response agent {resp_jid}")
 
                 # auto-block offenders via firewall-control messages to nodes
                 if self.agent.get("auto_block"):
@@ -127,10 +128,11 @@ class MonitoringAgent(Agent):
                         ctrl.set_metadata("protocol", "firewall-control")
                         ctrl.body = f"BLOCK_JID:{offender}"
                         await self.send(ctrl)
-                        print(f"Sent firewall-control BLOCK_JID for {offender} to {node}")
+                        print(f"[{datetime.datetime.now().time()}] [MonitoringAgent {self.agent.jid}] Sent firewall-control BLOCK_JID for {offender} to {node}")
 
             # Informational log: monitoring check completed (always log result)
-            print(f"Monitoring bot check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
+            now_ts2 = datetime.datetime.now().time()
+            print(f"[{now_ts2}] [MonitoringAgent {self.agent.jid}] Check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
 
         async def run(self):
             msg = await self.receive(timeout=1)
@@ -142,7 +144,7 @@ class MonitoringAgent(Agent):
                     print(f"Error processing message: {e}")
 
     async def setup(self):
-        print(f"MonitoringAgent {str(self.jid)} starting...")
+        print(f"[MonitoringAgent {str(self.jid)}] starting...")
         b = self.MonitorBehav()
         self.add_behaviour(b)
 

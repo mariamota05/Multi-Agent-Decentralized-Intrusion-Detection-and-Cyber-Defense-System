@@ -105,8 +105,6 @@ class FirewallBehaviour(CyclicBehaviour):
 
 		# Node/workstation firewall: apply blocklists for outbound sends as well.
 		# No special bypass behavior here.
-		if to in self.blocked_jids:
-			return False
 
 		for kw in self.blocked_keywords:
 			if kw and kw in body:
@@ -118,6 +116,19 @@ class FirewallBehaviour(CyclicBehaviour):
 			for k, v in metadata.items():
 				msg.set_metadata(k, str(v))
 		await self.send(msg)
+		# notify agent-level resource monitor (if present) about outbound send
+		try:
+			self.agent._force_pprint = True
+			# small one-shot adjustment to base cpu to simulate freeing/doing work
+			try:
+				# negative adjust reduces the reported base CPU briefly
+				self.agent._send_adjust = -2.0
+			except Exception:
+				pass
+			if hasattr(self.agent, "_resource_event") and self.agent._resource_event:
+				self.agent._resource_event.set()
+		except Exception:
+			pass
 		return True
 
 	async def _handle_control(self, msg: Message):
@@ -234,6 +245,17 @@ class RouterFirewallBehaviour(FirewallBehaviour):
 				for k, v in metadata.items():
 					msg.set_metadata(k, str(v))
 			await self.send(msg)
+			# notify resource monitor about this local-forward send as well
+			try:
+				self.agent._force_pprint = True
+				try:
+					self.agent._send_adjust = -2.0
+				except Exception:
+					pass
+				if hasattr(self.agent, "_resource_event") and self.agent._resource_event:
+					self.agent._resource_event.set()
+			except Exception:
+				pass
 			return True
 
 		# For external sends, apply blocklists
@@ -248,6 +270,17 @@ class RouterFirewallBehaviour(FirewallBehaviour):
 			for k, v in metadata.items():
 				msg.set_metadata(k, str(v))
 		await self.send(msg)
+		# notify agent-level resource monitor (if present) about outbound send
+		try:
+			self.agent._force_pprint = True
+			try:
+				self.agent._send_adjust = -2.0
+			except Exception:
+				pass
+			if hasattr(self.agent, "_resource_event") and self.agent._resource_event:
+				self.agent._resource_event.set()
+		except Exception:
+			pass
 		return True
 
 

@@ -66,7 +66,14 @@ class NodeAgent(Agent):
                         print(f"Firewall blocked inbound message from {msg.sender}")
                         return
                 now = datetime.datetime.now().time()
-                print(f"[{now}] Received from {msg.sender}: {msg.body}")
+                print(f"[{now}] [NodeAgent {self.agent.jid}] Received from {msg.sender}: {msg.body}")
+                # notify resource monitor that something happened (message arrived)
+                try:
+                    self.agent._force_pprint = True
+                    if hasattr(self.agent, "_resource_event"):
+                        self.agent._resource_event.set()
+                except Exception:
+                    pass
 
                 # try to parse structured JSON messages (e.g., CNP, resource reports)
                 parsed = None
@@ -76,82 +83,67 @@ class NodeAgent(Agent):
                 except Exception:
                     parsed = None
 
-                # handle cnp-request-response messages (router replies to node-initiated requests)
-                if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp-request-response":
-                    task_id = parsed.get("task_id")
-                    result = parsed.get("result", False)
-                    store = self.agent.get("cnp_request_results") or {}
-                    store[task_id] = result
-                    self.agent.set("cnp_request_results", store)
-                    print(f"Stored cnp-request-response for {task_id}: {result}")
-                    return
+                # CNP support is currently disabled; treat JSON messages as opaque
 
-                # handle structured CNP messages first
-                if parsed and isinstance(parsed, dict) and parsed.get("protocol") == "cnp":
-                    ctype = parsed.get("type")
-                    task_id = parsed.get("task_id")
-                    # Participant handling: CFP -> send PROPOSE
-                    if ctype == "CFP":
-                        # compute simple proposal based on available cpu and bandwidth
-                        cpu = float(self.agent.get("cpu_usage") or 0.0)
-                        bw = float(self.agent.get("bandwidth_usage") or 0.0)
-                        # higher available (inverse of usage) is better
-                        avail_cpu = max(0.0, 100.0 - cpu)
-                        avail_bw = max(0.0, 100.0 - bw)
-                        proposal = {"avail_cpu": avail_cpu, "avail_bw": avail_bw}
-                        prop_msg = Message(to=str(msg.sender))
-                        prop_msg.body = json.dumps({"protocol": "cnp", "type": "PROPOSE", "task_id": task_id, "proposal": proposal})
-                        await self.send(prop_msg)
-                        print(f"Sent PROPOSE for task {task_id} to {msg.sender}: {proposal}")
-                        # Do NOT record the proposal on the participant — proposals
-                        # must be delivered back to the manager who will collect them.
-                        return
+                # If the message carries task information (metadata 'task' JSON,
+                # parsed JSON with a 'task' field, or legacy 'TASK:' body),
+                # schedule it as an active task so ResourceBehav will account
+                # for its load until completion.
+                task_info = None
+                try:
+                    if msg.metadata and "task" in msg.metadata:
+                        raw = msg.metadata.get("task")
+                        if isinstance(raw, str):
+                            try:
+                                task_info = json.loads(raw)
+                            except Exception:
+                                task_info = None
+                        else:
+                            task_info = raw
+                except Exception:
+                    task_info = None
 
-                    # Participant accepted: perform task and reply INFORM when done
-                    if ctype == "ACCEPT_PROPOSAL":
-                        task = parsed.get("task") or {}
-                        duration = float(task.get("duration", 1.0))
-                        load = float(task.get("cpu_load", 10.0))
-                        # schedule a simulated task: increase cpu usage for duration
-                        active = self.agent.get("active_tasks") or {}
-                        end_ts = _now_ts() + duration
-                        active[task_id] = {"end": end_ts, "load": load}
-                        self.agent.set("active_tasks", active)
-                        print(f"Accepted task {task_id}; executing for {duration}s (cpu load +{load})")
+                if not task_info and isinstance(parsed, dict) and "task" in parsed:
+                    task_info = parsed.get("task")
 
-                        # simulate work asynchronously and send INFORM when done
-                        async def _do_and_inform():
-                            await asyncio.sleep(duration)
-                            inf = Message(to=str(msg.sender))
-                            inf.body = json.dumps({"protocol": "cnp", "type": "INFORM", "task_id": task_id, "result": "done"})
-                            await self.send(inf)
-                            # cleanup active tasks
-                            active = self.agent.get("active_tasks") or {}
-                            if task_id in active:
-                                del active[task_id]
-                                self.agent.set("active_tasks", active)
-                            print(f"Completed task {task_id}; sent INFORM to {msg.sender}")
+                if not task_info and body_text.upper().startswith("TASK:"):
+                    rest = body_text.split("TASK:", 1)[1].strip()
+                    try:
+                        task_info = json.loads(rest)
+                    except Exception:
+                        # fallback to simple key=value;semicolons
+                        try:
+                            parts = [p.strip() for p in rest.split(";") if p.strip()]
+                            ti = {}
+                            for p in parts:
+                                if "=" in p:
+                                    k, v = p.split("=", 1)
+                                    try:
+                                        ti[k.strip()] = float(v.strip())
+                                    except Exception:
+                                        ti[k.strip()] = v.strip()
+                            task_info = ti or None
+                        except Exception:
+                            task_info = None
 
-                        self.agent.loop.create_task(_do_and_inform())
-                        return
-
-                    # Manager/recipient handling: PROPOSE/REJECT/INFORM should be
-                    # stored so a running manager (start_cnp) can collect them.
-                    if ctype == "PROPOSE":
-                        proposal = parsed.get("proposal")
-                        store = self.agent.get("cnp_proposals") or {}
-                        # store proposals keyed by task_id; record sender and proposal
-                        store.setdefault(task_id, []).append({"from": str(msg.sender), "proposal": proposal})
-                        self.agent.set("cnp_proposals", store)
-                        print(f"Stored PROPOSE for task {task_id} from {msg.sender}: {proposal}")
-                        return
-
-                    if ctype in ("REJECT_PROPOSAL", "INFORM"):
-                        print(f"CNP message ({ctype}) for task {task_id} received: {parsed}")
-                        cnp_store = self.agent.get("cnp_proposals") or {}
-                        cnp_store.setdefault(task_id or "_misc", []).append({"msg": parsed, "from": str(msg.sender)})
-                        self.agent.set("cnp_proposals", cnp_store)
-                        return
+                if task_info:
+                    active = self.agent.get("active_tasks") or {}
+                    counter = self.agent.get("task_counter") or 0
+                    counter += 1
+                    tid = f"t{counter}-{int(_now_ts())}"
+                    self.agent.set("task_counter", counter)
+                    duration = float(task_info.get("duration", task_info.get("dur", 1.0)))
+                    load = float(task_info.get("cpu_load", task_info.get("load", task_info.get("cpu", 0.0))))
+                    active[tid] = {"end": _now_ts() + duration, "load": load}
+                    self.agent.set("active_tasks", active)
+                    print(f"Scheduled task {tid} on [NodeAgent {self.agent.jid}]: duration={duration} load={load}")
+                    # signal resource monitor to pprint this change
+                    try:
+                        self.agent._force_pprint = True
+                        if hasattr(self.agent, "_resource_event"):
+                            self.agent._resource_event.set()
+                    except Exception:
+                        pass
 
                 # simple protocol handling for legacy/plain messages
                 body = body_text
@@ -159,16 +151,16 @@ class NodeAgent(Agent):
                     reply = Message(to=str(msg.sender))
                     reply.body = "PONG"
                     await self.send(reply)
-                    print(f"Sent PONG to {msg.sender}")
+                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Sent PONG to {msg.sender}")
                 elif body.startswith("REQUEST:"):
                     content = body.split("REQUEST:", 1)[1]
                     reply = Message(to=str(msg.sender))
                     reply.body = f"RESPONSE: processed '{content.strip()}'"
                     await self.send(reply)
-                    print(f"Replied to request from {msg.sender}")
+                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Replied to request from {msg.sender}")
                 else:
                     # generic acknowledgement
-                    print(f"No handler for message body; ignoring or log for manual handling.")
+                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] No handler for message body; ignoring or log for manual handling.")
             else:
                 # timed out waiting for messages; just continue waiting
                 await asyncio.sleep(0.1)
@@ -196,37 +188,133 @@ class NodeAgent(Agent):
             print(f"Sent heartbeat to {len(peers)} peers (count={self.counter})")
             self.counter += 1
 
-    class ResourceBehav(PeriodicBehaviour):
+    class ResourceBehav(CyclicBehaviour):
         async def on_start(self):
-            # initialize active tasks store
+            # initialize active tasks store and last-known state
             self.agent.set("active_tasks", {})
+            self._last_active_count = 0
+            # print initial resource snapshot so initialization is visible
+            # allow a short-lived adjustment (set by other behaviours on send/receive)
+            adjust = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
+            base_cpu = random.uniform(5.0, 15.0) + adjust
+            base_bw = random.uniform(2.0, 10.0)
+            cpu_usage = min(100.0, base_cpu)
+            bw_usage = min(100.0, base_bw)
+            self.agent.set("cpu_usage", cpu_usage)
+            self.agent.set("bandwidth_usage", bw_usage)
+            print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Resource init: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks=0")
 
         async def run(self):
-            # simulate CPU and bandwidth usage: base noise plus active tasks
-            base_cpu = random.uniform(5.0, 15.0)
-            base_bw = random.uniform(2.0, 10.0)
+            # Event-driven resource monitor: wakes on agent._resource_event or
+            # after a timeout equal to the next task end. Prints state via pprint
+            # whenever tasks are added/removed or when a message arrives.
             active = self.agent.get("active_tasks") or {}
-            extra_cpu = 0.0
-            # remove finished tasks
             now = _now_ts()
-            to_delete = []
+
+            # Remove finished tasks
+            removed = []
             for tid, info in list(active.items()):
                 if info.get("end", 0) <= now:
-                    to_delete.append(tid)
+                    removed.append(tid)
                 else:
-                    extra_cpu += float(info.get("load", 0.0))
-            for tid in to_delete:
-                del active[tid]
-            self.agent.set("active_tasks", active)
+                    pass
+            if removed:
+                for tid in removed:
+                    del active[tid]
+                self.agent.set("active_tasks", active)
+
+            # Compute resource usage
+            extra_cpu = 0.0
+            for info in active.values():
+                extra_cpu += float(info.get("load", 0.0))
+
+            base_cpu = random.uniform(5.0, 15.0)
+            base_bw = random.uniform(2.0, 10.0)
 
             cpu_usage = min(100.0, base_cpu + extra_cpu)
             bw_usage = min(100.0, base_bw + extra_cpu * 0.2)
             self.agent.set("cpu_usage", cpu_usage)
             self.agent.set("bandwidth_usage", bw_usage)
-            print(f"Resource update for {self.agent.jid}: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% (active_tasks={len(active)})")
+
+            # Print state when something changed (task added/removed) or first run
+            force = bool(getattr(self.agent, "_force_pprint", False))
+            if removed or len(active) != self._last_active_count or force:
+                # concise single-line summary for simplicity
+                print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
+                if active:
+                    # small, compact list of active task ids
+                    print(f" [{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Active tasks: {', '.join(list(active.keys()))}")
+                try:
+                    # clear the force flag after printing
+                    if force:
+                        self.agent._force_pprint = False
+                except Exception:
+                    pass
+            else:
+                # occasional lightweight log to show steady state (optional)
+                pass
+
+            self._last_active_count = len(active)
+
+            # Determine sleep/wake behavior: wait until next task end or an explicit event
+            next_end = None
+            for info in active.values():
+                e = info.get("end", 0)
+                if not next_end or e < next_end:
+                    next_end = e
+
+            timeout = None
+            if next_end:
+                timeout = max(0.1, next_end - _now_ts())
+
+            ev = getattr(self.agent, "_resource_event", None)
+            try:
+                event_woken = False
+                if ev:
+                    if timeout is None:
+                        # wait indefinitely until an event
+                        await ev.wait()
+                        event_woken = True
+                    else:
+                        try:
+                            await asyncio.wait_for(ev.wait(), timeout=timeout)
+                            event_woken = True
+                        except asyncio.TimeoutError:
+                            # timeout means re-evaluate finished tasks
+                            event_woken = False
+
+                    # if the event was set, clear it now
+                    if event_woken:
+                        try:
+                            ev.clear()
+                        except Exception:
+                            pass
+                else:
+                    # fallback to a short sleep
+                    await asyncio.sleep(0.5)
+
+                # If we woke because of an explicit event (send/receive/task schedule),
+                # print the concise summary even if active count didn't change.
+                if event_woken:
+                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
+                    if active:
+                        print(f" [{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Active tasks: {', '.join(list(active.keys()))}")
+                    # clear any force flag and one-shot send adjustment
+                    try:
+                        self.agent._force_pprint = False
+                    except Exception:
+                        pass
+                    try:
+                        if getattr(self.agent, "_send_adjust", 0.0):
+                            self.agent._send_adjust = 0.0
+                    except Exception:
+                        pass
+            except Exception:
+                # ensure the behaviour does not crash
+                await asyncio.sleep(0.5)
 
     async def setup(self):
-        print(f"NodeAgent {str(self.jid)} starting...")
+        print(f"[NodeAgent {str(self.jid)}] starting...")
         # Add firewall behaviour and store reference for other behaviours
         fw = FirewallBehaviour()
         self.add_behaviour(fw)
@@ -246,19 +334,28 @@ class NodeAgent(Agent):
         # mark role so firewall can differentiate behaviour
         self.set("role", "node")
 
-        # initialize resource usage tracking and CNP store
+        # initialize resource usage tracking
         self.set("cpu_usage", 5.0)
         self.set("bandwidth_usage", 5.0)
-        self.set("cnp_proposals", {})
-        # store for node-initiated CNP request results (router responses)
-        self.set("cnp_request_results", {})
 
-        # resource simulation behaviour (periodic)
-        res = self.ResourceBehav(period=2)
+        # initialize an event for event-driven resource monitoring
+        try:
+            self._resource_event = asyncio.Event()
+        except Exception:
+            self._resource_event = None
+        # helper flag to force pprint on next resource cycle
+        self._force_pprint = False
+        # simple task counter
+        self.set("task_counter", 0)
+
+        # resource simulation behaviour (event-driven)
+        res = self.ResourceBehav()
         self.add_behaviour(res)
 
         recv = self.RecvBehav()
         self.add_behaviour(recv)
+
+        # CNP support removed: nodes operate with simple messaging and resources only
 
     # Node agents are participants only; CNP manager is hosted by the router.
 
