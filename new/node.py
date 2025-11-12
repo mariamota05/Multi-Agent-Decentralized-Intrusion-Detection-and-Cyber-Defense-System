@@ -36,6 +36,15 @@ from spade.message import Message
 from firewall import FirewallBehaviour
 
 
+def _log(agent_type: str, jid: str, msg: str) -> None:
+    """Uniform log helper used across this file.
+
+    Format: [HH:MM:SS] [<AgentType> <jid>] <msg>
+    """
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{agent_type} {jid}] {msg}")
+
+
 # Note: the user requested no XMPP server probe. SPADE is expected to be
 # available and a running XMPP server (or service) with accounts configured.
 
@@ -63,10 +72,9 @@ class NodeAgent(Agent):
                 if fw:
                     allowed = await fw.allow_message(msg)
                     if not allowed:
-                        print(f"Firewall blocked inbound message from {msg.sender}")
+                        _log("NodeAgent", str(self.agent.jid), f"Firewall blocked inbound message from {msg.sender}")
                         return
-                now = datetime.datetime.now().time()
-                print(f"[{now}] [NodeAgent {self.agent.jid}] Received from {msg.sender}: {msg.body}")
+                _log("NodeAgent", str(self.agent.jid), f"Received from {msg.sender}: {msg.body}")
                 # notify resource monitor that something happened (message arrived)
                 try:
                     self.agent._force_pprint = True
@@ -136,7 +144,7 @@ class NodeAgent(Agent):
                     load = float(task_info.get("cpu_load", task_info.get("load", task_info.get("cpu", 0.0))))
                     active[tid] = {"end": _now_ts() + duration, "load": load}
                     self.agent.set("active_tasks", active)
-                    print(f"Scheduled task {tid} on [NodeAgent {self.agent.jid}]: duration={duration} load={load}")
+                    _log("NodeAgent", str(self.agent.jid), f"Scheduled task {tid}: duration={duration} load={load}")
                     # signal resource monitor to pprint this change
                     try:
                         self.agent._force_pprint = True
@@ -151,16 +159,16 @@ class NodeAgent(Agent):
                     reply = Message(to=str(msg.sender))
                     reply.body = "PONG"
                     await self.send(reply)
-                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Sent PONG to {msg.sender}")
+                    _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {msg.sender}")
                 elif body.startswith("REQUEST:"):
                     content = body.split("REQUEST:", 1)[1]
                     reply = Message(to=str(msg.sender))
                     reply.body = f"RESPONSE: processed '{content.strip()}'"
                     await self.send(reply)
-                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Replied to request from {msg.sender}")
+                    _log("NodeAgent", str(self.agent.jid), f"Replied to request from {msg.sender}")
                 else:
                     # generic acknowledgement
-                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] No handler for message body; ignoring or log for manual handling.")
+                    _log("NodeAgent", str(self.agent.jid), "No handler for message body; ignoring or log for manual handling.")
             else:
                 # timed out waiting for messages; just continue waiting
                 await asyncio.sleep(0.1)
@@ -180,12 +188,12 @@ class NodeAgent(Agent):
                 if fw:
                     sent = await fw.send_through_firewall(p, body)
                     if not sent:
-                        print(f"Heartbeat blocked by firewall for {p}")
+                        _log("NodeAgent", str(self.agent.jid), f"Heartbeat blocked by firewall for {p}")
                 else:
                     msg = Message(to=p)
                     msg.body = f"HEARTBEAT from {str(self.agent.jid)} count={self.counter}"
                     await self.send(msg)
-            print(f"Sent heartbeat to {len(peers)} peers (count={self.counter})")
+            _log("NodeAgent", str(self.agent.jid), f"Sent heartbeat to {len(peers)} peers (count={self.counter})")
             self.counter += 1
 
     class ResourceBehav(CyclicBehaviour):
@@ -196,13 +204,20 @@ class NodeAgent(Agent):
             # print initial resource snapshot so initialization is visible
             # allow a short-lived adjustment (set by other behaviours on send/receive)
             adjust = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
-            base_cpu = random.uniform(5.0, 15.0) + adjust
-            base_bw = random.uniform(2.0, 10.0)
+            # Use deterministic base values if agent configured them (resource_seed or fixed_base_cpu/bw)
+            try:
+                base_cpu = float(self.agent.get("base_cpu", random.uniform(5.0, 15.0))) + adjust
+            except Exception:
+                base_cpu = random.uniform(5.0, 15.0) + adjust
+            try:
+                base_bw = float(self.agent.get("base_bw", random.uniform(2.0, 10.0)))
+            except Exception:
+                base_bw = random.uniform(2.0, 10.0)
             cpu_usage = min(100.0, base_cpu)
             bw_usage = min(100.0, base_bw)
             self.agent.set("cpu_usage", cpu_usage)
             self.agent.set("bandwidth_usage", bw_usage)
-            print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Resource init: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks=0")
+            _log("NodeAgent", str(self.agent.jid), f"Resource init: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks=0")
 
         async def run(self):
             # Event-driven resource monitor: wakes on agent._resource_event or
@@ -228,10 +243,20 @@ class NodeAgent(Agent):
             for info in active.values():
                 extra_cpu += float(info.get("load", 0.0))
 
-            base_cpu = random.uniform(5.0, 15.0)
-            base_bw = random.uniform(2.0, 10.0)
+            # Use configured deterministic base values when available
+            try:
+                base_cpu = float(self.agent.get("base_cpu", random.uniform(5.0, 15.0)))
+            except Exception:
+                base_cpu = random.uniform(5.0, 15.0)
+            try:
+                base_bw = float(self.agent.get("base_bw", random.uniform(2.0, 10.0)))
+            except Exception:
+                base_bw = random.uniform(2.0, 10.0)
 
-            cpu_usage = min(100.0, base_cpu + extra_cpu)
+            # include any one-shot send adjustment when reporting
+            send_adj = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
+
+            cpu_usage = min(100.0, base_cpu + extra_cpu + send_adj)
             bw_usage = min(100.0, base_bw + extra_cpu * 0.2)
             self.agent.set("cpu_usage", cpu_usage)
             self.agent.set("bandwidth_usage", bw_usage)
@@ -240,10 +265,10 @@ class NodeAgent(Agent):
             force = bool(getattr(self.agent, "_force_pprint", False))
             if removed or len(active) != self._last_active_count or force:
                 # concise single-line summary for simplicity
-                print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
+                _log("NodeAgent", str(self.agent.jid), f"Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
                 if active:
                     # small, compact list of active task ids
-                    print(f" [{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Active tasks: {', '.join(list(active.keys()))}")
+                    _log("NodeAgent", str(self.agent.jid), f"Active tasks: {', '.join(list(active.keys()))}")
                 try:
                     # clear the force flag after printing
                     if force:
@@ -296,9 +321,9 @@ class NodeAgent(Agent):
                 # If we woke because of an explicit event (send/receive/task schedule),
                 # print the concise summary even if active count didn't change.
                 if event_woken:
-                    print(f"[{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
+                    _log("NodeAgent", str(self.agent.jid), f"Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
                     if active:
-                        print(f" [{datetime.datetime.now().time()}] [NodeAgent {self.agent.jid}] Active tasks: {', '.join(list(active.keys()))}")
+                        _log("NodeAgent", str(self.agent.jid), f"Active tasks: {', '.join(list(active.keys()))}")
                     # clear any force flag and one-shot send adjustment
                     try:
                         self.agent._force_pprint = False
@@ -348,6 +373,28 @@ class NodeAgent(Agent):
         # simple task counter
         self.set("task_counter", 0)
 
+        # deterministic resource baseline option: set base_cpu/base_bw once if configured
+        try:
+            seed = self.get("resource_seed", None)
+            if seed is not None:
+                rng = random.Random(seed)
+            else:
+                rng = random
+            if self.get("fixed_base_cpu") is not None:
+                base_cpu_val = float(self.get("fixed_base_cpu"))
+            else:
+                base_cpu_val = rng.uniform(5.0, 15.0)
+            if self.get("fixed_base_bw") is not None:
+                base_bw_val = float(self.get("fixed_base_bw"))
+            else:
+                base_bw_val = rng.uniform(2.0, 10.0)
+            self.set("base_cpu", base_cpu_val)
+            self.set("base_bw", base_bw_val)
+            if seed is not None or self.get("fixed_base_cpu") is not None:
+                _log("NodeAgent", str(self.jid), f"Resource baseline set: base_cpu={base_cpu_val:.2f} base_bw={base_bw_val:.2f} (seed={seed})")
+        except Exception:
+            pass
+
         # resource simulation behaviour (event-driven)
         res = self.ResourceBehav()
         self.add_behaviour(res)
@@ -372,7 +419,7 @@ async def main():
     parser.add_argument("--no-auto-register", dest="auto_register", action="store_false", help="Disable auto_register when starting the agent")
     args = parser.parse_args()
 
-    print("Node (workstation/server) starting in non-interactive mode.")
+    _log("NodeAgent", args.jid, "Node (workstation/server) starting in non-interactive mode.")
     jid = args.jid
     passwd = args.password
     peers = [p.strip() for p in args.peers.split(",") if p.strip()]
@@ -383,8 +430,8 @@ async def main():
     try:
         await agent.start(auto_register=args.auto_register)
     except Exception as e:
-        print(f"Failed to start agent {jid}: {e}")
-        print("If auto-register failed, create the account on the XMPP server or enable in-band registration.")
+        _log("NodeAgent", jid, f"Failed to start: {e}")
+        _log("NodeAgent", jid, "If auto-register failed, create the account on the XMPP server or enable in-band registration.")
         return
 
     # start heartbeat if requested
@@ -392,14 +439,14 @@ async def main():
         hb = agent.HeartbeatBehav(period=args.heartbeat)
         agent.add_behaviour(hb)
 
-    print("Node running (non-interactive). Press Ctrl+C to stop.")
+    _log("NodeAgent", jid, "running (non-interactive). Press Ctrl+C to stop")
     try:
         await spade.wait_until_finished(agent)
     except KeyboardInterrupt:
-        print("Keyboard interrupt received, stopping agent...")
+        _log("NodeAgent", jid, "Keyboard interrupt received, stopping agent...")
     finally:
         await agent.stop()
-        print("Agent stopped. Goodbye.")
+        _log("NodeAgent", jid, "Agent stopped. Goodbye.")
 
 
 if __name__ == "__main__":

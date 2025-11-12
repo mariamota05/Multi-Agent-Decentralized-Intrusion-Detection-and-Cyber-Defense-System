@@ -36,6 +36,11 @@ from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 
 
+def _log(agent_type: str, jid: str, msg: str) -> None:
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{agent_type} {jid}] {msg}")
+
+
 class MonitoringAgent(Agent):
     """Agent that monitors messages and generates alerts.
 
@@ -69,7 +74,7 @@ class MonitoringAgent(Agent):
             ]
 
         async def on_start(self):
-            print(f"[MonitoringAgent {self.agent.jid}] Monitoring behaviour started")
+            _log("MonitoringAgent", str(self.agent.jid), "Monitoring behaviour started")
 
         async def process_message(self, msg: Message):
             now = asyncio.get_event_loop().time()
@@ -77,8 +82,8 @@ class MonitoringAgent(Agent):
             body = (msg.body or "").lower()
 
             # Informational log: monitoring check started
-            now_ts = datetime.datetime.now().time()
-            print(f"[{now_ts}] [MonitoringAgent {self.agent.jid}] Checking message from {sender}")
+            now_ts = datetime.datetime.now().strftime("%H:%M:%S")
+            _log("MonitoringAgent", str(self.agent.jid), f"Checking message from {sender}")
 
             suspicious = False
             reasons = []
@@ -109,7 +114,7 @@ class MonitoringAgent(Agent):
                     "body": msg.body,
                     "reasons": reasons,
                 }
-                print(f"[{ts}] [MonitoringAgent {self.agent.jid}] [ALERT] {alert}")
+                _log("MonitoringAgent", str(self.agent.jid), f"[ALERT] {alert}")
                 # notify response agent if available
                 resp_jid = self.agent.get("response_jid")
                 if resp_jid:
@@ -117,7 +122,7 @@ class MonitoringAgent(Agent):
                     m.set_metadata("protocol", "monitoring-alert")
                     m.body = f"ALERT {alert}"
                     await self.send(m)
-                    print(f"[{datetime.datetime.now().time()}] [MonitoringAgent {self.agent.jid}] Sent alert to response agent {resp_jid}")
+                    _log("MonitoringAgent", str(self.agent.jid), f"Sent alert to response agent {resp_jid}")
 
                 # auto-block offenders via firewall-control messages to nodes
                 if self.agent.get("auto_block"):
@@ -128,11 +133,11 @@ class MonitoringAgent(Agent):
                         ctrl.set_metadata("protocol", "firewall-control")
                         ctrl.body = f"BLOCK_JID:{offender}"
                         await self.send(ctrl)
-                        print(f"[{datetime.datetime.now().time()}] [MonitoringAgent {self.agent.jid}] Sent firewall-control BLOCK_JID for {offender} to {node}")
+                        _log("MonitoringAgent", str(self.agent.jid), f"Sent firewall-control BLOCK_JID for {offender} to {node}")
 
             # Informational log: monitoring check completed (always log result)
-            now_ts2 = datetime.datetime.now().time()
-            print(f"[{now_ts2}] [MonitoringAgent {self.agent.jid}] Check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
+            now_ts2 = datetime.datetime.now().strftime("%H:%M:%S")
+            _log("MonitoringAgent", str(self.agent.jid), f"Check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
 
         async def run(self):
             msg = await self.receive(timeout=1)
@@ -141,10 +146,10 @@ class MonitoringAgent(Agent):
                 try:
                     await self.process_message(msg)
                 except Exception as e:
-                    print(f"Error processing message: {e}")
+                    _log("MonitoringAgent", str(self.agent.jid), f"ERROR processing message: {e}")
 
     async def setup(self):
-        print(f"[MonitoringAgent {str(self.jid)}] starting...")
+        _log("MonitoringAgent", str(self.jid), "starting...")
         b = self.MonitorBehav()
         self.add_behaviour(b)
 
@@ -171,7 +176,7 @@ async def main():
     try:
         await agent.start(auto_register=True)
     except Exception as e:
-        print(f"Failed to start MonitoringAgent {args.jid}: {e}")
+        _log("MonitoringAgent", args.jid, f"Failed to start: {e}")
         return
 
     # Configure the monitoring behaviour thresholds if provided
@@ -181,11 +186,11 @@ async def main():
             b.window = args.window
             b.threshold = args.threshold
 
-    print("MonitoringAgent running. Press Ctrl+C to stop.")
+    _log("MonitoringAgent", args.jid, "running. Press Ctrl+C to stop")
     try:
         await spade.wait_until_finished(agent)
     except KeyboardInterrupt:
-        print("Stopping MonitoringAgent...")
+        _log("MonitoringAgent", args.jid, "Stopping...")
     finally:
         await agent.stop()
 

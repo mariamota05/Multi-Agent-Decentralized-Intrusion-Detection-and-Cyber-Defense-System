@@ -34,6 +34,11 @@ from spade.message import Message
 from firewall import RouterFirewallBehaviour
 
 
+def _log(agent_type: str, jid: str, msg: str) -> None:
+	ts = datetime.datetime.now().strftime("%H:%M:%S")
+	print(f"[{ts}] [{agent_type} {jid}] {msg}")
+
+
 class RouterAgent(Agent):
 	"""A simple router agent that forwards messages between nodes/routers.
 
@@ -49,16 +54,17 @@ class RouterAgent(Agent):
 			if not msg:
 				return
 
-			now = datetime.datetime.now().time()
-			print(f"[{now}] [Router {self.agent.jid}] received msg from {msg.sender}")
+			_log("Router", str(self.agent.jid), f"received msg from {msg.sender}")
 
 			# Firewall inbound check
 			fw = self.agent.get("firewall")
 			if fw:
 				allowed = await fw.allow_message(msg)
 				if not allowed:
-					print(f"Firewall blocked inbound message from {msg.sender}")
+					_log("Router", str(self.agent.jid), f"Firewall blocked inbound message from {msg.sender}")
 					return
+				else:
+					_log("Router", str(self.agent.jid), f"Firewall allowed message from {msg.sender}")
 
 
 			# Try to parse body JSON for special control messages (e.g., cnp-request)
@@ -80,8 +86,15 @@ class RouterAgent(Agent):
 				dst = str(msg.to) if msg.to else None
 
 			if not dst:
-				print(f"[Router {self.agent.jid}] message missing dst metadata; dropping")
+				_log("Router", str(self.agent.jid), "message missing dst metadata; dropping")
 				return
+
+			# Check TTL (Time-To-Live) to prevent routing loops
+			ttl = int(msg.metadata.get("ttl", 64)) if msg.metadata else 64
+			if ttl <= 0:
+				_log("Router", str(self.agent.jid), f"TTL expired for packet to {dst}; dropping")
+				return
+			ttl -= 1  # Decrement TTL for next hop
 
 			# Send copy to monitoring agents first (so monitor sees traffic before forwarding)
 			monitors = self.agent.get("monitor_jids") or []
@@ -119,12 +132,13 @@ class RouterAgent(Agent):
 				out = Message(to=dst)
 				out.body = msg.body
 				out.set_metadata("via", str(self.agent.jid))
+				out.set_metadata("ttl", str(ttl))  # Pass TTL along
 				if fw:
-					sent = await fw.send_through_firewall(dst, out.body, metadata={"via": str(self.agent.jid)})
+					sent = await fw.send_through_firewall(dst, out.body, metadata={"via": str(self.agent.jid), "ttl": str(ttl)})
 					if sent:
-						print(f"[Router {self.agent.jid}] Forwarded locally to {dst}")
+						_log("Router", str(self.agent.jid), f"Forwarded locally to {dst}")
 					else:
-						print(f"[Router {self.agent.jid}] Firewall blocked forwarding to local {dst}")
+						_log("Router", str(self.agent.jid), f"Firewall blocked forwarding to local {dst}")
 				else:
 					await self.send(out)
 					print(f"Forwarded locally to {dst}")
@@ -140,29 +154,30 @@ class RouterAgent(Agent):
 						break
 
 			if not next_hop:
-				print(f"[Router {self.agent.jid}] No route for {dst}; dropping packet")
+				_log("Router", str(self.agent.jid), f"No route for {dst}; dropping packet")
 				return
 
 			# Forward to next hop
 			fwd_body = msg.body
 			# Use firewall helper if present
 			if fw:
-				sent_ok = await fw.send_through_firewall(next_hop, fwd_body, metadata={"dst": dst, "via": str(self.agent.jid)})
+				sent_ok = await fw.send_through_firewall(next_hop, fwd_body, metadata={"dst": dst, "via": str(self.agent.jid), "ttl": str(ttl)})
 			else:
 				fwd = Message(to=next_hop)
 				fwd.body = fwd_body
 				fwd.set_metadata("dst", dst)
 				fwd.set_metadata("via", str(self.agent.jid))
+				fwd.set_metadata("ttl", str(ttl))
 				await self.send(fwd)
 				sent_ok = True
 
 			if sent_ok:
-				print(f"[Router {self.agent.jid}] Forwarded {dst} via next hop {next_hop}")
+				_log("Router", str(self.agent.jid), f"Forwarded {dst} via next hop {next_hop}")
 			else:
-				print(f"[Router {self.agent.jid}] Firewall prevented forwarding to {next_hop} for dst {dst}")
+				_log("Router", str(self.agent.jid), f"Firewall prevented forwarding to {next_hop} for dst {dst}")
 
 	async def setup(self):
-		print(f"[Router {str(self.jid)}] starting...")
+		_log("Router", str(self.jid), "starting...")
 
 		# attach a router-specific firewall behaviour and store reference
 		fw = RouterFirewallBehaviour()
@@ -187,7 +202,7 @@ class RouterAgent(Agent):
 		ln = self.get("local_nodes") or set()
 		monitors = self.get("monitor_jids") or []
 		internal = self.get("internal_monitor_jids") or []
-		print(f"[Router {str(self.jid)}] configuration:")
+		_log("Router", str(self.jid), "configuration:")
 		print(f"  local_nodes: {sorted(list(ln))}")
 		print(f"  routing_table: {rt}")
 		print(f"  monitors: {monitors}, internal_monitors: {internal}")
@@ -208,7 +223,7 @@ class RouterAgent(Agent):
 		ln.add(jid)
 		self.set("local_nodes", ln)
 		# log when a node connects to this router
-		print(f"[Router {str(self.jid)}] node {jid} connected; local_nodes now: {sorted(list(ln))}")
+		_log("Router", str(self.jid), f"node {jid} connected; local_nodes now: {sorted(list(ln))}")
 
 	def add_internal_monitor(self, jid: str):
 		ims = self.get("internal_monitor_jids") or []
@@ -248,14 +263,14 @@ async def main():
 	try:
 		await agent.start(auto_register=args.auto_register)
 	except Exception as e:
-		print(f"Failed to start RouterAgent {args.jid}: {e}")
+		_log("Router", args.jid, f"Failed to start: {e}")
 		return
 
-	print("RouterAgent running. Press Ctrl+C to stop.")
+	_log("Router", args.jid, "running. Press Ctrl+C to stop")
 	try:
 		await spade.wait_until_finished(agent)
 	except KeyboardInterrupt:
-		print("Stopping RouterAgent...")
+		_log("Router", args.jid, "Stopping...")
 	finally:
 		await agent.stop()
 

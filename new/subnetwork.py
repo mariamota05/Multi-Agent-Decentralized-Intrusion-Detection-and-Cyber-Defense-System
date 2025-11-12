@@ -23,12 +23,18 @@ import argparse
 import asyncio
 import os
 import json
+import datetime
 
 import spade
 
 from node import NodeAgent
 from router import RouterAgent
 from monitoring import MonitoringAgent
+
+
+def _log(hint: str, msg: str) -> None:
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] [{hint}] {msg}")
 
 
 async def run_subnetwork(domain: str, password: str, run_seconds: int = 6):
@@ -61,7 +67,7 @@ async def run_subnetwork(domain: str, password: str, run_seconds: int = 6):
     await node1.start(auto_register=True)
     await node2.start(auto_register=True)
 
-    print("All agents started. Sending test message from node1 -> node2 via router...")
+    _log("subnetwork", "All agents started. Sending test message from node1 -> node2 via router...")
 
     # Allow behaviours to initialize
     await asyncio.sleep(1)
@@ -76,19 +82,19 @@ async def run_subnetwork(domain: str, password: str, run_seconds: int = 6):
             "Hello node2, this is node1",
             metadata={"dst": str(node2_jid), "task": json.dumps(task_meta)},
         )
-        print(f"node1->router send_through_firewall returned {sent}")
+        _log("subnetwork", f"node1->router send_through_firewall returned {sent}")
     else:
         msg = spade.message.Message(to=str(router_jid))
         msg.body = "Hello node2, this is node1"
         msg.set_metadata("dst", str(node2_jid))
         msg.set_metadata("task", json.dumps(task_meta))
         await node1.send(msg)
-        print("node1->router sent raw message (no firewall)")
+        _log("subnetwork", "node1->router sent raw message (no firewall)")
 
     # Wait to allow routing and monitoring to process
     await asyncio.sleep(run_seconds)
 
-    print("Stopping agents...")
+    _log("subnetwork", "Stopping agents...")
     await node1.stop()
     await node2.stop()
     await router.stop()
@@ -110,7 +116,7 @@ def main():
     try:
         spade.run(run_subnetwork(args.domain, passwd, run_seconds=args.time))
     except KeyboardInterrupt:
-        print("Interrupted by user; exiting.")
+        _log("subnetwork", "Interrupted by user; exiting.")
 
 
 if __name__ == "__main__":
