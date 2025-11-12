@@ -28,13 +28,21 @@ import asyncio
 import os
 import json
 import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 
 import spade
 
 from node import NodeAgent
 from router import RouterAgent
 from monitoring import MonitoringAgent
+
+# Optional pygame visualization
+try:
+    from visualizer import NetworkVisualizer
+    PYGAME_AVAILABLE = True
+except ImportError:
+    PYGAME_AVAILABLE = False
+    NetworkVisualizer = None
 
 
 def _log(hint: str, msg: str) -> None:
@@ -54,6 +62,9 @@ ROUTER_TOPOLOGY = "ring"  # Options: "ring", "mesh", "star", "line"
 # Optional: enable deterministic resource simulation for nodes
 USE_DETERMINISTIC_RESOURCES = False
 RESOURCE_SEED_BASE = 1000  # Base seed for nodes (incremented per node)
+
+# Visualization
+ENABLE_VISUALIZATION = True  # Set to False to disable pygame window
 
 # ============================================================================
 
@@ -155,6 +166,14 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     """
     _log("environment", f"Building network: {NUM_ROUTERS} routers, {NODES_PER_ROUTER} nodes/router, topology={ROUTER_TOPOLOGY}")
     
+    # Initialize visualizer if enabled
+    viz = None
+    if ENABLE_VISUALIZATION and PYGAME_AVAILABLE:
+        _log("environment", "Starting pygame visualization...")
+        viz = NetworkVisualizer(width=1200, height=800)
+    elif ENABLE_VISUALIZATION and not PYGAME_AVAILABLE:
+        _log("environment", "Pygame not available - install with: pip install pygame")
+    
     # Build router connectivity
     router_connections = build_router_topology(NUM_ROUTERS, ROUTER_TOPOLOGY)
     _log("environment", f"Router topology: {router_connections}")
@@ -231,6 +250,11 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     
     _log("environment", "All agents started. Network is live.")
     
+    # Set up visualizer topology
+    if viz:
+        viz.set_topology(routers, nodes, router_connections, domain)
+        _log("environment", "Pygame visualization ready")
+    
     # Allow behaviours to initialize
     await asyncio.sleep(2)
     
@@ -259,6 +283,8 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                     metadata={"dst": dest_jid, "task": json.dumps(task_meta), "ttl": "64"},
                 )
                 _log("environment", f"Test 1 sent: {sent}")
+                if viz:
+                    viz.add_packet(f"router0_node0@{domain}", dest_jid)
     
     await asyncio.sleep(1)
     
@@ -284,6 +310,8 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                     metadata={"dst": dest_jid, "task": json.dumps(task_meta), "ttl": "64"},
                 )
                 _log("environment", f"Test 2 sent: {sent}")
+                if viz:
+                    viz.add_packet(f"router1_node0@{domain}", dest_jid)
     
     await asyncio.sleep(1)
     
@@ -309,6 +337,8 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                     metadata={"dst": dest_jid, "task": json.dumps(task_meta), "ttl": "64"},
                 )
                 _log("environment", f"Test 3 sent: {sent}")
+                if viz:
+                    viz.add_packet(f"router0_node1@{domain}", dest_jid)
     
     await asyncio.sleep(1)
     
@@ -333,12 +363,36 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                     metadata={"dst": dest_jid, "ttl": "1"},  # TTL=1, will expire after 1 hop
                 )
                 _log("environment", f"Test 4 sent: {sent}")
+                if viz:
+                    viz.add_packet(f"router0_node0@{domain}", dest_jid, ttl=1)
     
     _log("environment", "=== All Test Messages Sent ===")
     
-    # Run for specified time
+    # Run with visualization loop or simple sleep
     _log("environment", f"Network running for {run_seconds} seconds...")
-    await asyncio.sleep(run_seconds)
+    
+    if viz:
+        # Visualization loop
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            # Handle pygame events
+            if not viz.handle_events():
+                _log("environment", "Visualization window closed by user")
+                break
+            
+            # Update and draw
+            viz.update()
+            viz.draw()
+            
+            # Check if time expired
+            if asyncio.get_event_loop().time() - start_time > run_seconds:
+                break
+            
+            # Small async sleep to allow other tasks
+            await asyncio.sleep(0.016)  # ~60 FPS
+    else:
+        # No visualization - just sleep
+        await asyncio.sleep(run_seconds)
     
     # Stop all agents
     _log("environment", "Stopping all agents...")
@@ -347,6 +401,10 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     for r_idx, router_jid, router in routers:
         await router.stop()
     await monitor.stop()
+    
+    # Close visualization
+    if viz:
+        viz.close()
     
     _log("environment", "Environment stopped. Goodbye.")
 
