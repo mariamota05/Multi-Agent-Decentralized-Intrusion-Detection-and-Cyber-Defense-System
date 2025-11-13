@@ -85,6 +85,7 @@ class NetworkVisualizer:
         self.agents: Dict[str, Agent] = {}
         self.connections: List[Tuple[str, str]] = []  # (agent1_jid, agent2_jid)
         self.router_connections: List[Tuple[str, str]] = []  # (router1_jid, router2_jid)
+        self.monitor_connections: List[Tuple[str, str]] = []  # (monitor_jid, router_jid)
         self.packets: deque = deque(maxlen=50)  # Active packets
         
         # Stats
@@ -92,29 +93,36 @@ class NetworkVisualizer:
         self.start_time = time.time()
         
     def set_topology(self, routers: List[Tuple], nodes: List[Tuple], 
-                     router_topology: Dict[int, List[int]], domain: str = "localhost"):
+                     monitors: List[Tuple], router_topology: Dict[int, List[int]], 
+                     domain: str = "localhost"):
         """Set up the network topology from environment data.
         
         Args:
             routers: List of (r_idx, router_jid, router_agent) tuples
             nodes: List of (r_idx, n_idx, node_jid, node_agent) tuples
+            monitors: List of (r_idx, monitor_jid, monitor_agent) tuples
             router_topology: Dict mapping router index to list of neighbor indices
             domain: XMPP domain
         """
-        # Calculate positions (spread across screen)
+        # Calculate positions - arrange routers in a circle for ring/mesh topologies
         num_routers = len(routers)
-        # Spread routers more widely
-        router_spacing = min(350, (self.width - 300) // max(num_routers, 1))
-        router_y = self.height // 2
         
-        # Add routers - center them horizontally
-        total_router_width = (num_routers - 1) * router_spacing
-        start_x = (self.width - total_router_width) // 2
+        # Center of the router circle
+        center_x = self.width // 2
+        center_y = self.height // 2
         
+        # Radius for router circle (larger for more routers)
+        router_radius = min(250, (min(self.width, self.height) - 300) // 2)
+        
+        # Add routers in a circle
         for r_idx, router_jid, _ in routers:
             name = f"R{r_idx}"
-            x = start_x + r_idx * router_spacing
-            y = router_y
+            
+            # Arrange routers in circle, starting from top (-π/2)
+            angle = (r_idx / num_routers) * 2 * math.pi - (math.pi / 2)
+            x = center_x + int(router_radius * math.cos(angle))
+            y = center_y + int(router_radius * math.sin(angle))
+            
             self.agents[router_jid] = Agent(
                 name=name,
                 jid=router_jid,
@@ -156,14 +164,32 @@ class NetworkVisualizer:
                 # Add connection between node and router
                 self.connections.append((node_jid, router_jid))
         
-        # Add monitor (top center)
-        monitor_jid = f"monitor@{domain}"
-        self.agents[monitor_jid] = Agent(
-            name="Monitor",
-            jid=monitor_jid,
-            position=(self.width // 2, 50),
-            agent_type='monitor'
-        )
+        # Add monitors - position each monitor between its router and center
+        # This shows monitors as intermediaries between routers and the network core
+        for r_idx, monitor_jid, _ in monitors:
+            router_jid = f"router{r_idx}@{domain}"
+            if router_jid not in self.agents:
+                continue
+            
+            # Position monitor halfway between router and center, slightly offset
+            router_pos = self.agents[router_jid].position
+            angle = (r_idx / num_routers) * 2 * math.pi - (math.pi / 2)
+            
+            # Monitor at 60% distance from center (between center and router)
+            monitor_radius = int(router_radius * 0.6)
+            x = center_x + int(monitor_radius * math.cos(angle))
+            y = center_y + int(monitor_radius * math.sin(angle))
+            
+            name = f"M{r_idx}"
+            self.agents[monitor_jid] = Agent(
+                name=name,
+                jid=monitor_jid,
+                position=(x, y),
+                agent_type='monitor'
+            )
+            
+            # Add monitoring connection (monitor to its router)
+            self.monitor_connections.append((monitor_jid, router_jid))
         
         # Add router-to-router connections
         for r_idx, neighbors in router_topology.items():
@@ -241,7 +267,27 @@ class NetworkVisualizer:
         """Render the visualization."""
         self.screen.fill(self.BG_COLOR)
         
-        # Draw connections (node-router and router-router)
+        # Draw monitor connections (dotted lines to routers)
+        for conn in self.monitor_connections:
+            if conn[0] in self.agents and conn[1] in self.agents:
+                pos1 = self.agents[conn[0]].position
+                pos2 = self.agents[conn[1]].position
+                # Draw dotted line by drawing small segments
+                dx = pos2[0] - pos1[0]
+                dy = pos2[1] - pos1[1]
+                distance = math.sqrt(dx**2 + dy**2)
+                if distance > 0:
+                    segments = int(distance / 10)  # 10 pixel segments
+                    for i in range(0, segments, 2):  # Every other segment
+                        t1 = i / segments
+                        t2 = min((i + 1) / segments, 1.0)
+                        x1 = int(pos1[0] + dx * t1)
+                        y1 = int(pos1[1] + dy * t1)
+                        x2 = int(pos1[0] + dx * t2)
+                        y2 = int(pos1[1] + dy * t2)
+                        pygame.draw.line(self.screen, (180, 180, 60), (x1, y1), (x2, y2), 1)
+        
+        # Draw connections (node-router)
         for conn in self.connections:
             if conn[0] in self.agents and conn[1] in self.agents:
                 pos1 = self.agents[conn[0]].position

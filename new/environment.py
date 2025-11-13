@@ -13,7 +13,7 @@ Usage:
   python new/environment.py --domain localhost --password secret --time 10
 
 Structure:
-  - MonitoringAgent: global network monitor
+  - MonitoringAgents: one per router for local traffic inspection
   - RouterAgents: interconnected routers (router0, router1, ..., routerN)
   - NodeAgents: local nodes per router (router0_node0, router0_node1, ...)
 
@@ -231,11 +231,15 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     positions = compute_grid_positions(NUM_ROUTERS, NODES_PER_ROUTER)
     
     # Create agents
-    monitor_jid = f"monitor@{domain}"
-    monitor = MonitoringAgent(monitor_jid, password)
-    
+    monitors = []  # One monitor per router
     routers = []
     nodes = []
+    
+    # Create monitors (one per router)
+    for r_idx in range(NUM_ROUTERS):
+        monitor_jid = f"monitor{r_idx}@{domain}"
+        monitor = MonitoringAgent(monitor_jid, password)
+        monitors.append((r_idx, monitor_jid, monitor))
     
     # Create routers
     for r_idx in range(NUM_ROUTERS):
@@ -279,13 +283,16 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
             prefix = f"router{neighbor_idx}_*"
             router.add_route(prefix, neighbor_router_jid)
         
-        # Set monitor
-        router.set("monitor_jids", [monitor_jid])
-        router.set("internal_monitor_jids", [monitor_jid])
+        # Set local monitor for this router
+        local_monitor_jid = f"monitor{r_idx}@{domain}"
+        router.set("monitor_jids", [local_monitor_jid])
+        router.set("internal_monitor_jids", [local_monitor_jid])
     
     # Start all agents
-    _log("environment", "Starting monitor...")
-    await monitor.start(auto_register=True)
+    _log("environment", f"Starting {NUM_ROUTERS} monitors (one per router)...")
+    for r_idx, monitor_jid, monitor in monitors:
+        await monitor.start(auto_register=True)
+        _log("environment", f"Monitor {r_idx} started for router {r_idx}")
     
     _log("environment", f"Starting {NUM_ROUTERS} routers...")
     for r_idx, router_jid, router in routers:
@@ -301,7 +308,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     
     # Set up visualizer topology
     if viz:
-        viz.set_topology(routers, nodes, router_connections, domain)
+        viz.set_topology(routers, nodes, monitors, router_connections, domain)
         _log("environment", "Pygame visualization ready")
     
     # Allow behaviours to initialize and first resource stats to be calculated
@@ -338,13 +345,17 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 1 sent: {sent}")
                 if viz:
-                    # Cross-router: node0 -> router0 -> router2 -> node0
+                    # Cross-router: node0 -> router0 -> monitor0 (inspect) -> router2 -> monitor2 (inspect) -> node0
                     viz.add_packet(f"router0_node0@{domain}", f"router0@{domain}")
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router0@{domain}", f"router2@{domain}")
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router2@{domain}", dest_jid)
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router0@{domain}", f"monitor0@{domain}")  # Router sends to monitor
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"monitor0@{domain}", f"router2@{domain}")  # Monitor forwards to next router
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router2@{domain}", f"monitor2@{domain}")  # Router2 sends to its monitor
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"monitor2@{domain}", dest_jid)  # Monitor delivers to local node
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
     
     await viz_sleep(viz, 1.5)
     
@@ -371,11 +382,13 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 2 sent: {sent}")
                 if viz:
-                    # Intra-router: node0 -> router1 -> node1
+                    # Intra-router: node0 -> router1 -> monitor1 (inspect) -> node1
                     viz.add_packet(f"router1_node0@{domain}", f"router1@{domain}")
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router1@{domain}", dest_jid)
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router1@{domain}", f"monitor1@{domain}")  # Router sends to monitor
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"monitor1@{domain}", dest_jid)  # Monitor delivers to local node
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
     
     await viz_sleep(viz, 1.5)
     
@@ -402,13 +415,17 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 3 sent: {sent}")
                 if viz:
-                    # Adjacent router: node1 -> router0 -> router1 -> node0
+                    # Adjacent router: node1 -> router0 -> monitor0 (inspect) -> router1 -> monitor1 (inspect) -> node0
                     viz.add_packet(f"router0_node1@{domain}", f"router0@{domain}")
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router0@{domain}", f"router1@{domain}")
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router1@{domain}", dest_jid)
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router0@{domain}", f"monitor0@{domain}")  # Router sends to monitor
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"monitor0@{domain}", f"router1@{domain}")  # Monitor forwards to next router
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router1@{domain}", f"monitor1@{domain}")  # Router1 sends to its monitor
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"monitor1@{domain}", dest_jid)  # Monitor delivers to local node
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
     
     await viz_sleep(viz, 1.5)
     
@@ -434,12 +451,14 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 4 sent: {sent}")
                 if viz:
-                    # Low TTL: should only go node0 -> router0 -> router2 (expires)
+                    # Low TTL: node0 -> router0 -> monitor0 (inspect, TTL=1) -> router2 (expires)
                     viz.add_packet(f"router0_node0@{domain}", f"router0@{domain}", ttl=1)
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router0@{domain}", f"router2@{domain}", ttl=1)
-                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
-                    # Packet expires at router2, won't reach destination
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router0@{domain}", f"monitor0@{domain}", ttl=1)  # Monitor inspects
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"monitor0@{domain}", f"router2@{domain}", ttl=0)  # Forwarded but TTL=0, will expire
+                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
+                    # Packet expires at router2, won't reach monitor2 or destination
     
     await viz_sleep(viz, 1.0)
     _log("environment", "=== All Test Messages Sent ===")
@@ -485,7 +504,8 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
         await node.stop()
     for r_idx, router_jid, router in routers:
         await router.stop()
-    await monitor.stop()
+    for r_idx, monitor_jid, monitor in monitors:
+        await monitor.stop()
     
     # Close visualization
     if viz:
