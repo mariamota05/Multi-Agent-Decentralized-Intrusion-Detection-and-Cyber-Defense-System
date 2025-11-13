@@ -103,13 +103,18 @@ class NetworkVisualizer:
         """
         # Calculate positions (spread across screen)
         num_routers = len(routers)
-        router_spacing = (self.width - 200) // max(num_routers, 1)
+        # Spread routers more widely
+        router_spacing = min(350, (self.width - 300) // max(num_routers, 1))
+        router_y = self.height // 2
         
-        # Add routers
+        # Add routers - center them horizontally
+        total_router_width = (num_routers - 1) * router_spacing
+        start_x = (self.width - total_router_width) // 2
+        
         for r_idx, router_jid, _ in routers:
             name = f"R{r_idx}"
-            x = 100 + r_idx * router_spacing
-            y = self.height // 2
+            x = start_x + r_idx * router_spacing
+            y = router_y
             self.agents[router_jid] = Agent(
                 name=name,
                 jid=router_jid,
@@ -132,11 +137,13 @@ class NetworkVisualizer:
             router_pos = self.agents[router_jid].position
             num_nodes = len(node_list)
             
-            # Position nodes in a circle around router
+            # Position nodes in a circle around router with better spacing
+            radius = 100  # Distance from router
             for i, (n_idx, node_jid) in enumerate(node_list):
-                angle = (i / num_nodes) * 2 * math.pi
-                offset_x = int(120 * math.cos(angle))
-                offset_y = int(120 * math.sin(angle))
+                # Start angle from top and distribute evenly
+                angle = (i / num_nodes) * 2 * math.pi - (math.pi / 2)  # Start from top
+                offset_x = int(radius * math.cos(angle))
+                offset_y = int(radius * math.sin(angle))
                 
                 name = f"N{r_idx}.{n_idx}"
                 self.agents[node_jid] = Agent(

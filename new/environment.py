@@ -156,6 +156,55 @@ def compute_grid_positions(num_routers: int, nodes_per_router: int) -> Dict[str,
     return positions
 
 
+async def update_visualizer_stats(viz, nodes, domain: str):
+    """Update visualizer with live agent resource stats.
+    
+    Args:
+        viz: NetworkVisualizer instance
+        nodes: List of (r_idx, n_idx, node_jid, node_agent) tuples
+        domain: XMPP domain
+    """
+    if not viz:
+        return
+    
+    for r_idx, n_idx, node_jid, node in nodes:
+        try:
+            cpu = node.get("cpu_usage") or 0.0
+            bw = node.get("bandwidth_usage") or 0.0
+            viz.update_agent_stats(node_jid, cpu=cpu, bandwidth=bw)
+        except Exception:
+            pass
+
+
+async def viz_sleep(viz, duration: float, update_stats_fn=None):
+    """Sleep while keeping visualizer responsive.
+    
+    Args:
+        viz: NetworkVisualizer instance (can be None)
+        duration: Sleep duration in seconds
+        update_stats_fn: Optional coroutine to call periodically for stats updates
+    """
+    if not viz:
+        await asyncio.sleep(duration)
+        return
+    
+    start = asyncio.get_event_loop().time()
+    while asyncio.get_event_loop().time() - start < duration:
+        # Handle events
+        viz.handle_events()
+        
+        # Update stats if function provided
+        if update_stats_fn and (asyncio.get_event_loop().time() - start) % 0.5 < 0.016:
+            await update_stats_fn()
+        
+        # Update and draw
+        viz.update()
+        viz.draw()
+        
+        # Small sleep for ~60 FPS
+        await asyncio.sleep(0.016)
+
+
 async def run_environment(domain: str, password: str, run_seconds: int = 15):
     """Create and run the full network environment.
     
@@ -255,8 +304,13 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
         viz.set_topology(routers, nodes, router_connections, domain)
         _log("environment", "Pygame visualization ready")
     
-    # Allow behaviours to initialize
-    await asyncio.sleep(2)
+    # Allow behaviours to initialize and first resource stats to be calculated
+    # Keep visualizer responsive during initialization
+    await viz_sleep(viz, 3.0, lambda: update_visualizer_stats(viz, nodes, domain))
+    
+    # Update visualizer with initial resource stats
+    if viz:
+        await update_visualizer_stats(viz, nodes, domain)
     
     # Send multiple test messages to demonstrate different routing scenarios
     _log("environment", "=== Starting Test Message Scenarios ===")
@@ -284,9 +338,15 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 1 sent: {sent}")
                 if viz:
-                    viz.add_packet(f"router0_node0@{domain}", dest_jid)
+                    # Cross-router: node0 -> router0 -> router2 -> node0
+                    viz.add_packet(f"router0_node0@{domain}", f"router0@{domain}")
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router0@{domain}", f"router2@{domain}")
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router2@{domain}", dest_jid)
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
     
-    await asyncio.sleep(1)
+    await viz_sleep(viz, 1.5)
     
     # Test 2: Intra-router message (same subnet)
     if NODES_PER_ROUTER >= 2:
@@ -311,9 +371,13 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 2 sent: {sent}")
                 if viz:
-                    viz.add_packet(f"router1_node0@{domain}", dest_jid)
+                    # Intra-router: node0 -> router1 -> node1
+                    viz.add_packet(f"router1_node0@{domain}", f"router1@{domain}")
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router1@{domain}", dest_jid)
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
     
-    await asyncio.sleep(1)
+    await viz_sleep(viz, 1.5)
     
     # Test 3: Adjacent router message (router0 -> router1)
     if NUM_ROUTERS >= 2 and NODES_PER_ROUTER >= 1:
@@ -338,9 +402,15 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 3 sent: {sent}")
                 if viz:
-                    viz.add_packet(f"router0_node1@{domain}", dest_jid)
+                    # Adjacent router: node1 -> router0 -> router1 -> node0
+                    viz.add_packet(f"router0_node1@{domain}", f"router0@{domain}")
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router0@{domain}", f"router1@{domain}")
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router1@{domain}", dest_jid)
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
     
-    await asyncio.sleep(1)
+    await viz_sleep(viz, 1.5)
     
     # Test 4: Low TTL message (should expire if multi-hop)
     if NUM_ROUTERS >= 3 and NODES_PER_ROUTER >= 1:
@@ -364,28 +434,43 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 )
                 _log("environment", f"Test 4 sent: {sent}")
                 if viz:
-                    viz.add_packet(f"router0_node0@{domain}", dest_jid, ttl=1)
+                    # Low TTL: should only go node0 -> router0 -> router2 (expires)
+                    viz.add_packet(f"router0_node0@{domain}", f"router0@{domain}", ttl=1)
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    viz.add_packet(f"router0@{domain}", f"router2@{domain}", ttl=1)
+                    await viz_sleep(viz, 0.5, lambda: update_visualizer_stats(viz, nodes, domain))
+                    # Packet expires at router2, won't reach destination
     
+    await viz_sleep(viz, 1.0)
     _log("environment", "=== All Test Messages Sent ===")
     
     # Run with visualization loop or simple sleep
     _log("environment", f"Network running for {run_seconds} seconds...")
     
     if viz:
-        # Visualization loop
+        # Visualization loop with continuous resource updates
         start_time = asyncio.get_event_loop().time()
+        last_stats_update = start_time
+        stats_update_interval = 0.5  # Update stats every 0.5 seconds
+        
         while True:
             # Handle pygame events
             if not viz.handle_events():
                 _log("environment", "Visualization window closed by user")
                 break
             
+            # Update agent stats periodically
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_stats_update >= stats_update_interval:
+                await update_visualizer_stats(viz, nodes, domain)
+                last_stats_update = current_time
+            
             # Update and draw
             viz.update()
             viz.draw()
             
             # Check if time expired
-            if asyncio.get_event_loop().time() - start_time > run_seconds:
+            if current_time - start_time > run_seconds:
                 break
             
             # Small async sleep to allow other tasks
