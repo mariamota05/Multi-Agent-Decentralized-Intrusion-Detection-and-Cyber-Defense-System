@@ -268,74 +268,69 @@ class IncidentResponseAgent(Agent):
                 for node_jid in nodes_to_protect:
                     ctrl = Message(to=node_jid)
                     ctrl.set_metadata("protocol", "firewall-control")
-                    ctrl.body = f"TEMP_BLOCK:{offender_jid}:30s"
+                    ctrl.body = f"TEMP_BLOCK:{offender_jid}:15s"
                     await self.send(ctrl)
                 
                 _log("IncidentResponse", str(self.agent.jid), 
-                     f"MITIGATION: Temporary block (30s) applied to {offender_jid}")
+                     f"MITIGATION: Temporary block (15s) applied to {offender_jid}")
                 
                 # 3. Schedule monitoring (informational - could trigger follow-up checks)
                 _log("IncidentResponse", str(self.agent.jid), 
                      f"MITIGATION: Monitoring {offender_jid} for sustained DDoS activity")
                 
                 return True
-                
+
+            # --- INÍCIO DA MODIFICAÇÃO (INSIDER_THREAT) ---
             elif threat_type == "insider_threat":
                 # STRATEGY: Account suspension + access audit + admin alert
-                _log("IncidentResponse", str(self.agent.jid), 
+                _log("IncidentResponse", str(self.agent.jid),
                      f"MITIGATION: Insider threat response - suspending {offender_jid}")
-                
-                await asyncio.sleep(0.7)  # Thorough investigation takes time
-                
+
+                await asyncio.sleep(0.7)  # Response time
+
                 # 1. Suspend account access (soft block - could be reversed)
                 for node_jid in nodes_to_protect:
                     ctrl = Message(to=node_jid)
                     ctrl.set_metadata("protocol", "firewall-control")
                     ctrl.body = f"SUSPEND_ACCESS:{offender_jid}"
                     await self.send(ctrl)
-                
-                _log("IncidentResponse", str(self.agent.jid), 
+
+                _log("IncidentResponse", str(self.agent.jid),
                      f"MITIGATION: Suspended access for {offender_jid} on all nodes")
-                
+
                 # 2. Trigger access audit (informational - logs what the insider accessed)
-                _log("IncidentResponse", str(self.agent.jid), 
+                _log("IncidentResponse", str(self.agent.jid),
                      f"MITIGATION: Initiating access audit for {offender_jid}")
-                
+
                 # 3. Alert administrators (could escalate to human review)
                 for node_jid in nodes_to_protect:
                     alert = Message(to=node_jid)
                     alert.set_metadata("protocol", "firewall-control")
                     alert.body = f"ADMIN_ALERT:insider_threat_{incident_id}:{offender_jid}"
                     await self.send(alert)
-                
-                _log("IncidentResponse", str(self.agent.jid), 
+
+                _log("IncidentResponse", str(self.agent.jid),
                      f"MITIGATION: Administrator alerts sent for incident {incident_id}")
-                
-                # 4. Full block if investigation confirms malicious intent
-                await asyncio.sleep(0.3)
-                for node_jid in nodes_to_protect:
-                    ctrl = Message(to=node_jid)
-                    ctrl.set_metadata("protocol", "firewall-control")
-                    ctrl.body = f"BLOCK_JID:{offender_jid}"
-                    await self.send(ctrl)
-                
-                _log("IncidentResponse", str(self.agent.jid), 
-                     f"MITIGATION: Permanent block applied to {offender_jid} after investigation")
-                
+
+                # 4. REMOVIDO: A escalada para bloqueio permanente deve ser manual
+                _log("IncidentResponse", str(self.agent.jid),
+                     f"MITIGATION: Action complete. Awaiting human review for permanent block.")
+
                 return True
-            
+            # --- FIM DA MODIFICAÇÃO (INSIDER_THREAT) ---
+
             else:
                 # Unknown threat type - apply conservative default (block)
-                _log("IncidentResponse", str(self.agent.jid), 
+                _log("IncidentResponse", str(self.agent.jid),
                      f"MITIGATION: Unknown threat type '{threat_type}' - applying default block")
-                
+
                 await asyncio.sleep(0.5)
                 for node_jid in nodes_to_protect:
                     ctrl = Message(to=node_jid)
                     ctrl.set_metadata("protocol", "firewall-control")
                     ctrl.body = f"BLOCK_JID:{offender_jid}"
                     await self.send(ctrl)
-                
+
                 return True
 
         async def run(self):
@@ -343,7 +338,7 @@ class IncidentResponseAgent(Agent):
             if msg:
                 protocol = msg.get_metadata("protocol")
                 performative = msg.get_metadata("performative")
-                
+
                 if protocol == "cnp-cfp" and performative == "CFP":
                     await self.handle_cfp(msg)
                 elif protocol == "cnp-accept" and performative == "ACCEPT_PROPOSAL":
@@ -351,20 +346,20 @@ class IncidentResponseAgent(Agent):
 
     async def setup(self):
         _log("IncidentResponse", str(self.jid), "starting...")
-        
+
         # Initialize resource tracking
         self.set("cpu_usage", 10.0)  # Base idle CPU
         self.set("bandwidth_usage", 3.0)  # Base idle bandwidth
         self.set("active_incidents", {})
-        
+
         # Start cleanup behaviour (removes old resolved/failed incidents)
         cleanup_behav = self.CleanupBehaviour(period=3.0)
         self.add_behaviour(cleanup_behav)
-        
+
         # Start resource monitoring behaviour
         resource_behav = self.ResourceBehaviour(period=2.0)
         self.add_behaviour(resource_behav)
-        
+
         # Start CNP participant behaviour
         cnp_behav = self.CNPParticipantBehaviour()
         self.add_behaviour(cnp_behav)
@@ -373,7 +368,7 @@ class IncidentResponseAgent(Agent):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--jid", required=True, help="Response agent JID")
-    parser.add_argument("--password", required=False, help="Agent password; if omitted you'll be prompted")
+    parser.addi_argument("--password", required=False, help="Agent password; if omitted you'll be prompted")
     parser.add_argument("--nodes", default="", help="Comma-separated node JIDs to protect (send firewall commands)")
     args = parser.parse_args()
 

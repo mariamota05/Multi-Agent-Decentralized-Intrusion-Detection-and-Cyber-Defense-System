@@ -91,9 +91,18 @@ class InsiderAttacker(Agent):
                     _log("[!!] Phase 3: Persistent data exfiltration attempts")
                 msg_body = "ATTACK: Persistent unauthorized access attempt - trying data exfiltration"
                 phase = 3
-            
-            # Send message with escalating resource load
-            msg = Message(to=target)
+
+            try:
+                # Extrai o JID do router a partir do JID do nó
+                # (ex: "router1_node0@localhost" -> "router1" + "@" + "localhost")
+                router_jid = target.split('_')[0] + "@" + target.split('@')[1]
+            except Exception:
+                _log(f"ERRO: Não foi possível extrair o router JID do target {target}")
+                router_jid = target  # Fallback para o comportamento antigo se o nome for inesperado
+
+                # A mensagem é enviada PARA O ROUTER, com o nó como destino final
+            msg = Message(to=router_jid)
+            msg.set_metadata("dst", target)
             msg.set_metadata("protocol", "attack")
             task_data = {
                 "cpu_load": phase * 8.0,  # Escalating load: 8%, 16%, 24%

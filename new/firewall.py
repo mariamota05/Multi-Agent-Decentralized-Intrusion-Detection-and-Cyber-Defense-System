@@ -147,11 +147,17 @@ class FirewallBehaviour(CyclicBehaviour):
             if kw and kw in body:
                 return False
 
+        # --- INÍCIO DA MODIFICAÇÃO (FIREWALLBEHAVIOUR) ---
         # Check for threats in message body (only for non-blocked senders)
         threat_keywords = [
             "malware", "virus", "exploit", "trojan", "worm",
-            "ransomware", "failed login", "failed_login", "unauthorized"
+            "ransomware"
+            # "failed login", "failed_login", "unauthorized" REMOVIDAS.
+            # Esta deteção passa a ser responsabilidade do MonitoringAgent,
+            # que usa "memória" (threshold) para evitar falsos positivos.
+            # A firewall local só deve detetar ameaças imediatas (malware).
         ]
+        # --- FIM DA MODIFICAÇÃO (FIREWALLBEHAVIOUR) ---
 
         threat_detected = False
         detected_keywords = []
@@ -306,7 +312,7 @@ class FirewallBehaviour(CyclicBehaviour):
                 except ValueError:
                     reply.body = f"ERROR Invalid duration format: {duration_str}"
             else:
-                reply.body = "ERROR Invalid TEMP_BLOCK format (use TEMP_BLOCK:jid:30s)"
+                reply.body = "ERROR Invalid TEMP_BLOCK format (use TEMP_BLOCK:jid:15s)"
             await self.send(reply)
             return
 
@@ -478,11 +484,14 @@ class RouterFirewallBehaviour(FirewallBehaviour):
             if kw and kw in body:
                 return False
 
+        # --- INÍCIO DA MODIFICAÇÃO (ROUTERFIREWALLBEHAVIOUR) ---
         # Check for threats in message body (only for non-blocked senders)
         threat_keywords = [
             "malware", "virus", "exploit", "trojan", "worm",
-            "ransomware", "failed login", "failed_login", "unauthorized"
+            "ransomware"
+            # "failed login", "failed_login", "unauthorized" REMOVIDAS.
         ]
+        # --- FIM DA MODIFICAÇÃO (ROUTERFIREWALLBEHAVIOUR) ---
 
         threat_detected = False
         detected_keywords = []

@@ -86,8 +86,11 @@ NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
 # No attackers (test routing only):
 # ATTACKERS = []
 #
-ATTACKERS = [("ddos", ["router1_node0@localhost"], 8, 15, 3),
-]
+'''ATTACKERS = [("insider_threat", ["router1_node0@localhost"], 6, 40, 3),
+             ("ddos", ["router2_node1@localhost"], 7, 30, 5),
+             ("stealth_malware", ["router0_node0@localhost", "router3_node1@localhost"], 4, 50, 2)]'''
+
+ATTACKERS = [("ddos", ["router2_node1@localhost"], 7, 30, 5)]
 
 # ============================================================================
 # MESSAGE TESTING (optional - for testing routing)
@@ -165,7 +168,7 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
     return connections
 
 
-async def run_environment(domain: str, password: str, run_seconds: int = 15):
+async def run_environment(domain: str, password: str, run_seconds: int = 200):
     """Create and run the full network environment.
     
     Args:
@@ -456,7 +459,7 @@ def main():
     parser = argparse.ArgumentParser(description="Run scalable multi-router network environment")
     parser.add_argument("--domain", default="localhost", help="XMPP domain/server (default: localhost)")
     parser.add_argument("--password", required=False, help="Password used for all agents (optional)")
-    parser.add_argument("--time", type=int, default=15, help="Seconds to run the network")
+    parser.add_argument("--time", type=int, default=200, help="Seconds to run the network")
     args = parser.parse_args()
     
     passwd = args.password or os.environ.get("TEST_AGENT_PASSWORD") or "password"

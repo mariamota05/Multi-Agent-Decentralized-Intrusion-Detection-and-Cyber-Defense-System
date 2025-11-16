@@ -58,33 +58,33 @@ class MonitoringAgent(Agent):
 
     class ResourceBehaviour(PeriodicBehaviour):
         """Periodically updates monitor resource metrics based on analysis and CNP activity."""
-        
+
         async def run(self):
             # Get current metrics
             messages_analyzed = self.agent.get("messages_analyzed") or 0
             pending_cfps = self.agent.get("pending_cfps") or {}
             active_auctions = len(pending_cfps)
-            
+
             # Base load for monitoring operation
             base_cpu = 20.0  # Traffic analysis is CPU-intensive
-            base_bw = 10.0   # Receiving copies of all network traffic
-            
+            base_bw = 10.0  # Receiving copies of all network traffic
+
             # Additional load based on analysis workload
             analysis_cpu = messages_analyzed * 1.5
             analysis_bw = messages_analyzed * 1.0
-            
+
             # Additional load based on active CNP auctions
             auction_cpu = active_auctions * 10.0  # Each auction requires proposal evaluation
-            auction_bw = active_auctions * 5.0    # CFP broadcasts and proposal collection
-            
+            auction_bw = active_auctions * 5.0  # CFP broadcasts and proposal collection
+
             # Calculate total usage (capped at 100%)
             cpu_usage = min(100.0, base_cpu + analysis_cpu + auction_cpu)
             bandwidth_usage = min(100.0, base_bw + analysis_bw + auction_bw)
-            
+
             # Update agent state
             self.agent.set("cpu_usage", cpu_usage)
             self.agent.set("bandwidth_usage", bandwidth_usage)
-            
+
             # Reset message counter for next period
             self.agent.set("messages_analyzed", 0)
 
@@ -107,7 +107,7 @@ class MonitoringAgent(Agent):
             if msg:
                 protocol = msg.get_metadata("protocol")
                 performative = msg.get_metadata("performative")
-                
+
                 if protocol == "cnp-propose" and performative == "PROPOSE":
                     await self.handle_propose(msg)
                 elif protocol == "cnp-inform" and performative == "INFORM":
@@ -118,25 +118,25 @@ class MonitoringAgent(Agent):
             incident_id = msg.get_metadata("incident_id")
             score = float(msg.get_metadata("availability_score") or 999.0)
             bidder_jid = str(msg.sender)
-            
+
             pending = self.agent.get("pending_cfps") or {}
-            
+
             if incident_id not in pending:
-                _log("MonitoringAgent", str(self.agent.jid), 
+                _log("MonitoringAgent", str(self.agent.jid),
                      f"Received late proposal from {bidder_jid} for incident {incident_id}")
                 return
-            
+
             # Add proposal to incident
             pending[incident_id]["proposals"].append({
                 "bidder_jid": bidder_jid,
                 "score": score
             })
-            
-            _log("MonitoringAgent", str(self.agent.jid), 
+
+            _log("MonitoringAgent", str(self.agent.jid),
                  f"Received proposal from {bidder_jid} for incident {incident_id}: score={score:.2f}")
-            
+
             self.agent.set("pending_cfps", pending)
-            
+
             # Evaluate immediately if we have all expected proposals
             response_jids = self.agent.get("response_jids") or []
             if len(pending[incident_id]["proposals"]) >= len(response_jids):
@@ -145,27 +145,27 @@ class MonitoringAgent(Agent):
         async def evaluate_proposals(self, incident_id: str):
             """Select best proposal and award contract"""
             pending = self.agent.get("pending_cfps") or {}
-            
+
             if incident_id not in pending:
                 return
-            
+
             incident = pending[incident_id]
             proposals = incident["proposals"]
-            
+
             if not proposals:
-                _log("MonitoringAgent", str(self.agent.jid), 
+                _log("MonitoringAgent", str(self.agent.jid),
                      f"No proposals received for incident {incident_id}")
                 del pending[incident_id]
                 self.agent.set("pending_cfps", pending)
                 return
-            
+
             # Select best proposal (lowest score = most available)
             best = min(proposals, key=lambda p: p["score"])
             winner_jid = best["bidder_jid"]
-            
-            _log("MonitoringAgent", str(self.agent.jid), 
+
+            _log("MonitoringAgent", str(self.agent.jid),
                  f"AUCTION RESULT: {winner_jid} won incident {incident_id} with score {best['score']:.2f}")
-            
+
             # Send ACCEPT_PROPOSAL to winner
             accept = Message(to=winner_jid)
             accept.set_metadata("protocol", "cnp-accept")
@@ -175,7 +175,7 @@ class MonitoringAgent(Agent):
             accept.set_metadata("offender_jid", incident["offender_jid"])
             accept.body = f"Contract awarded for incident {incident_id}"
             await self.send(accept)
-            
+
             # Send REJECT_PROPOSAL to losers
             for proposal in proposals:
                 if proposal["bidder_jid"] != winner_jid:
@@ -185,7 +185,7 @@ class MonitoringAgent(Agent):
                     reject.set_metadata("incident_id", incident_id)
                     reject.body = f"Proposal rejected for incident {incident_id}"
                     await self.send(reject)
-            
+
             # Update incident status
             incident["status"] = "awarded"
             incident["winner"] = winner_jid
@@ -195,10 +195,10 @@ class MonitoringAgent(Agent):
             """Receive completion notification from response agent"""
             incident_id = msg.get_metadata("incident_id")
             status = msg.get_metadata("status")
-            
-            _log("MonitoringAgent", str(self.agent.jid), 
+
+            _log("MonitoringAgent", str(self.agent.jid),
                  f"Incident {incident_id} completed by {msg.sender}: {status}")
-            
+
             # Remove from pending
             pending = self.agent.get("pending_cfps") or {}
             if incident_id in pending:
@@ -206,37 +206,52 @@ class MonitoringAgent(Agent):
                 self.agent.set("pending_cfps", pending)
 
     class MonitorBehav(CyclicBehaviour):
+        # --- INÍCIO DA MODIFICAÇÃO (INIT) ---
         def __init__(self, suspicious_window: int = 10, suspicious_threshold: int = 5, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            # time window (seconds) for rate-based detection
-            self.window = suspicious_window
-            # number of suspicious events from same sender within window to raise alert
-            self.threshold = suspicious_threshold
-            # map sender -> timestamps deque
+            # Limites para DDoS/Rate (já existentes)
+            self.window = suspicious_window  # ex: 10s
+            self.threshold = suspicious_threshold  # ex: 5 msgs
+
+            # Dicionário de "memória" para DDoS/rate
             self.events: dict[str, Deque[float]] = defaultdict(lambda: deque())
-            # keyword blacklist
-            self.keywords = [
+
+            # --- NOVAS ADIÇÕES PARA RESPOSTA PROPORCIONAL ---
+            # Dicionário de "memória" para palavras-chave suspeitas (ex: failed login)
+            self.suspicious_keyword_events: dict[str, Deque[float]] = defaultdict(lambda: deque())
+            # Limites para logins falhados (3 tentativas em 60 segundos)
+            self.suspicious_keyword_window: int = 60
+            self.suspicious_keyword_threshold: int = 3
+
+            # Palavras-chave de alerta imediato (Risco Alto)
+            self.high_priority_keywords = [
                 "malware",
                 "virus",
                 "exploit",
-                "attack",
+                # "attack" removida por ser genérica e causar conflito
                 "trojan",
                 "worm",
                 "ransomware",
+            ]
+            # Palavras-chave de alerta com "memória" (Risco Médio/Baixo)
+            self.low_priority_keywords = [
                 "failed login",
                 "failed_login",
                 "unauthorized",
             ]
+            # --- FIM DAS ADIÇÕES (INIT) ---
 
         async def on_start(self):
             _log("MonitoringAgent", str(self.agent.jid), "Monitoring behaviour started")
-            # Adicionar esta linha
-            self.alerted_senders: Dict[str, float] = {}  # Mapeia sender ->_expiry_time
+            # Mapeia sender -> expiry_time (lógica de silenciamento já existente)
+            self.alerted_senders: Dict[str, float] = {}
 
+        # --- INÍCIO DA MODIFICAÇÃO (PROCESS_MESSAGE) ---
         async def process_message(self, msg: Message):
             now = asyncio.get_event_loop().time()
             protocol = msg.get_metadata("protocol")
 
+            # Lógica de 'original_sender' (já existente)
             if protocol == "network-copy":
                 sender = msg.get_metadata("original_sender")
                 if not sender:
@@ -247,13 +262,12 @@ class MonitoringAgent(Agent):
             if not sender:
                 sender = "unknown"
 
-            # CORREÇÃO: "LISTA BRANCA" DE SEGURANÇA
+            # "LISTA BRANCA" DE SEGURANÇA (já existente)
             if "response" in sender or "monitor" in sender:
                 _log("MonitoringAgent", str(self.agent.jid), f"Ignoring whitelisted message from {sender}")
                 return
 
-            # --- INÍCIO DA CORREÇÃO (IGNORAR ALERTAS REPETIDOS) ---
-            # Verificar se este 'sender' já está "silenciado"
+            # IGNORAR ALERTAS REPETIDOS (lógica de silenciamento já existente)
             if sender in self.alerted_senders:
                 if now < self.alerted_senders[sender]:
                     _log("MonitoringAgent", str(self.agent.jid), f"Ignoring already-alerted sender {sender}")
@@ -261,19 +275,20 @@ class MonitoringAgent(Agent):
                 else:
                     # O silenciamento expirou, remover
                     del self.alerted_senders[sender]
-            # --- FIM DA CORREÇÃO ---
+            # --- FIM DO BLOCO DE SILENCIAMENTO ---
 
             body = (msg.body or "").lower()
 
             self.agent.set("messages_analyzed", (self.agent.get("messages_analyzed") or 0) + 1)
-            now_ts = datetime.datetime.now().strftime("%H:%M:%S")
             _log("MonitoringAgent", str(self.agent.jid), f"Checking message from {sender}")
 
             suspicious = False
             reasons = []
 
+            # 1. VERIFICAR A TAXA DE MENSAGENS (DDoS) (lógica já existente)
             dq = self.events[sender]
             dq.append(now)
+            # Purge old events
             while dq and dq[0] < now - self.window:
                 dq.popleft()
 
@@ -281,21 +296,47 @@ class MonitoringAgent(Agent):
                 suspicious = True
                 reasons.append(f"rate:{len(dq)} in {self.window}s")
 
-            for kw in self.keywords:
-                if kw in body:
-                    suspicious = True
-                    reasons.append(f"keyword:{kw}")
+            # --- LÓGICA DE KEYWORD MODIFICADA ---
+            # 2. VERIFICAR PALAVRAS-CHAVE DE RISCO ALTO (Alerta Imediato)
+            if not suspicious:  # Só verifica se já não for suspeito
+                for kw in self.high_priority_keywords:
+                    if kw in body:
+                        suspicious = True
+                        reasons.append(f"high_priority_keyword:{kw}")
+                        break  # Encontrámos uma, não precisamos de procurar mais
+
+            # 3. VERIFICAR PALAVRAS-CHAVE DE RISCO BAIXO (Alerta com "Memória")
+            if not suspicious:  # Só verifica se ainda não for suspeito
+                for kw in self.low_priority_keywords:
+                    if kw in body:
+                        # Encontrámos uma palavra-chave de risco baixo. Não disparamos já.
+                        # Adicionamos ao balde de "memória" desse sender.
+                        kw_dq = self.suspicious_keyword_events[sender]
+                        kw_dq.append(now)
+
+                        # Limpar eventos antigos
+                        while kw_dq and kw_dq[0] < now - self.suspicious_keyword_window:
+                            kw_dq.popleft()
+
+                        # Agora, verificamos se o limite foi atingido
+                        if len(kw_dq) >= self.suspicious_keyword_threshold:
+                            suspicious = True
+                            reasons.append(f"keyword_rate:{kw} ({len(kw_dq)} in {self.suspicious_keyword_window}s)")
+                        else:
+                            # Registar a tentativa, mas não disparar o alarme
+                            _log("MonitoringAgent", str(self.agent.jid),
+                                 f"Low-priority keyword '{kw}' from {sender} detected. Count: {len(kw_dq)}/{self.suspicious_keyword_threshold}")
+
+                        break  # Processámos a primeira que encontrámos
+            # --- FIM DA LÓGICA MODIFICADA ---
 
             if suspicious:
-                # --- INÍCIO DA CORREÇÃO (DEFINIR O SILENCIAMENTO) ---
-                # Apenas alertar se AINDA não tivermos alertado
+                # Lógica de silenciamento (já existente)
                 if sender not in self.alerted_senders:
-                    # Silenciar este 'sender' por 30 segundos
-                    self.alerted_senders[sender] = now + 30.0
-                    _log("MonitoringAgent", str(self.agent.jid), f"Muting sender {sender} for 30 seconds.")
-                # --- FIM DA CORREÇÃO ---
+                    # Silenciar este 'sender' por 15 segundos
+                    self.alerted_senders[sender] = now + 15.0
+                    _log("MonitoringAgent", str(self.agent.jid), f"Muting sender {sender} for 15 seconds.")
                 else:
-                    # Se ele já está silenciado, não fazemos nada
                     _log("MonitoringAgent", str(self.agent.jid),
                          f"Check completed for {sender}. Suspicious=True (already muted).")
                     return  # Não iniciar um novo leilão
@@ -309,21 +350,23 @@ class MonitoringAgent(Agent):
                 }
                 _log("MonitoringAgent", str(self.agent.jid), f"[ALERT] {alert}")
 
-                # (O resto da lógica de ameaça e CNP continua igual)
+                # --- LÓGICA DE CLASSIFICAÇÃO DE AMEAÇA MELHORADA ---
                 threat_type = "unknown"
-                if any("rate:" in r for r in reasons):
+                # Usar startswith() para evitar que "rate:" corresponda a "keyword_rate:"
+                if any(r.startswith("rate:") for r in reasons):
                     threat_type = "ddos"
-                elif any("keyword:malware" in r or "keyword:virus" in r for r in reasons):
-                    threat_type = "malware"
-                elif any("keyword:unauthorized" in r or "keyword:failed" in r for r in reasons):
+                elif any(r.startswith("keyword_rate:") for r in reasons):
+                    # Se foi a taxa de keywords que disparou (ex: failed login)
                     threat_type = "insider_threat"
-                elif any("keyword:ddos" in r or "keyword:attack" in r for r in reasons):
-                    threat_type = "ddos"
+                elif any(r.startswith("high_priority_keyword:") for r in reasons):
+                    # Se foi uma keyword de alta prioridade
+                    threat_type = "malware"
 
                 response_jids = self.agent.get("response_jids") or []
                 if response_jids:
                     await self.initiate_cnp(sender, threat_type, alert)
                 else:
+                    # ... (código de fallback, permanece igual) ...
                     resp_jid = self.agent.get("response_jid")
                     if resp_jid:
                         m = Message(to=resp_jid)
@@ -332,6 +375,7 @@ class MonitoringAgent(Agent):
                         await self.send(m)
                         _log("MonitoringAgent", str(self.agent.jid), f"Sent alert to response agent {resp_jid}")
 
+                # ... (código de auto-block, permanece igual) ...
                 if self.agent.get("auto_block"):
                     offender = sender
                     nodes = self.agent.get("nodes_to_notify") or []
@@ -343,9 +387,10 @@ class MonitoringAgent(Agent):
                         _log("MonitoringAgent", str(self.agent.jid),
                              f"Sent firewall-control BLOCK_JID for {offender} to {node}")
 
-            now_ts2 = datetime.datetime.now().strftime("%H:%M:%S")
             _log("MonitoringAgent", str(self.agent.jid),
                  f"Check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
+
+        # --- FIM DA MODIFICAÇÃO (PROCESS_MESSAGE) ---
 
         async def initiate_cnp(self, offender_jid: str, threat_type: str, alert: Dict[str, Any]):
             """Start CNP auction for incident response"""
@@ -353,12 +398,12 @@ class MonitoringAgent(Agent):
             counter = self.agent.get("incident_counter") or 0
             incident_id = f"incident_{counter}"
             self.agent.set("incident_counter", counter + 1)
-            
+
             response_jids = self.agent.get("response_jids") or []
-            
-            _log("MonitoringAgent", str(self.agent.jid), 
+
+            _log("MonitoringAgent", str(self.agent.jid),
                  f"Starting CNP auction for incident {incident_id}: {threat_type} from {offender_jid}")
-            
+
             # Track pending CFP
             pending = self.agent.get("pending_cfps") or {}
             pending[incident_id] = {
@@ -371,7 +416,7 @@ class MonitoringAgent(Agent):
                 "cfp_time": datetime.datetime.now().isoformat()
             }
             self.agent.set("pending_cfps", pending)
-            
+
             # Send CFP to all response agents
             for resp_jid in response_jids:
                 cfp = Message(to=resp_jid)
@@ -384,47 +429,60 @@ class MonitoringAgent(Agent):
                 cfp.body = f"CFP for incident {incident_id}: {threat_type} from {offender_jid}"
                 await self.send(cfp)
                 _log("MonitoringAgent", str(self.agent.jid), f"Sent CFP to {resp_jid}")
-            
+
             # Schedule proposal evaluation (will happen automatically in CNP behaviour)
             # After 2.1s, CNP behaviour will check deadline and evaluate
 
         async def run(self):
             msg = await self.receive(timeout=1)
             if msg:
-                # Check if this is a threat alert from router (forwarded from node firewall)
+                # --- INÍCIO DA MODIFICAÇÃO (RUN / THREAT-ALERT) ---
                 protocol = msg.get_metadata("protocol")
                 if protocol == "threat-alert":
                     _log("MonitoringAgent", str(self.agent.jid), f"Threat alert from router: {msg.body}")
-                    # Parse threat alert: "THREAT from <attacker> to <node>: <keywords> - <body>"
                     try:
                         parts = msg.body.split(":", 1)
                         if len(parts) == 2:
                             header = parts[0]  # "THREAT from X to Y"
                             from_match = header.split("from ")[1].split(" to ")[0] if "from " in header else "unknown"
                             offender_jid = from_match.strip()
-                            
-                            # Trigger CNP for incident response
+
+                            # --- INÍCIO DA CORREÇÃO DE CLASSIFICAÇÃO ---
+                            alert_body = msg.body.lower()
+                            # Default é malware, a menos que encontremos palavras de insider_threat
+                            threat_type = "malware"
+
+                            # Usamos a lista de low_priority_keywords para reclassificar
+                            for kw in self.low_priority_keywords:
+                                if kw in alert_body:
+                                    threat_type = "insider_threat"
+                                    break
+                            # --- FIM DA CORREÇÃO ---
+
                             alert = {
                                 "time": datetime.datetime.now().isoformat(),
                                 "sender": offender_jid,
                                 "body": msg.body,
                                 "reasons": ["firewall-detected-threat"]
                             }
-                            await self.initiate_cnp(offender_jid, "malware", alert)
+                            # Usamos o threat_type corrigido
+                            await self.initiate_cnp(offender_jid, threat_type, alert)
                     except Exception as e:
                         _log("MonitoringAgent", str(self.agent.jid), f"Error parsing threat alert: {e}")
                     return
-                
+                # --- FIM DA MODIFICAÇÃO (RUN / THREAT-ALERT) ---
+
                 # Check if this is a network copy from router (for monitoring)
                 if protocol == "network-copy":
-                    _log("MonitoringAgent", str(self.agent.jid), f"[MONITOR] Analyzing network message from router: {msg.sender}")
+                    _log("MonitoringAgent", str(self.agent.jid),
+                         f"[MONITOR] Analyzing network message from router: {msg.sender}")
                     # Process the copied message for threat detection
                     try:
                         await self.process_message(msg)
                     except Exception as e:
                         _log("MonitoringAgent", str(self.agent.jid), f"ERROR processing network-copy: {e}")
                     return
-                
+
                 # handle monitoring of any other message
                 try:
                     await self.process_message(msg)
@@ -433,24 +491,24 @@ class MonitoringAgent(Agent):
 
     async def setup(self):
         _log("MonitoringAgent", str(self.jid), "starting...")
-        
+
         # Initialize resource tracking
         self.set("cpu_usage", 20.0)  # Base monitoring CPU
         self.set("bandwidth_usage", 10.0)  # Base monitoring bandwidth
         self.set("messages_analyzed", 0)  # Message counter
-        
+
         # Initialize CNP tracking
         self.set("pending_cfps", {})
         self.set("incident_counter", 0)  # Counter for incident IDs
-        
+
         # Start resource monitoring behaviour
         resource_behav = self.ResourceBehaviour(period=2.0)
         self.add_behaviour(resource_behav)
-        
+
         # Start monitoring behaviour
         monitor_behav = self.MonitorBehav()
         self.add_behaviour(monitor_behav)
-        
+
         # Start CNP initiator behaviour if response agents configured
         response_jids = self.get("response_jids") or []
         if response_jids:
@@ -464,8 +522,10 @@ async def main():
     parser.add_argument("--jid", required=True, help="Monitoring agent JID")
     parser.add_argument("--password", required=False, help="Agent password; if omitted you'll be prompted")
     parser.add_argument("--nodes", default="", help="Comma-separated node JIDs to instruct for blocking (optional)")
-    parser.add_argument("--response", default="", help="Comma-separated response agent JIDs for CNP auctions (replaces legacy single response)")
-    parser.add_argument("--auto-block", action="store_true", help="If set, send BLOCK_JID commands to nodes on detections")
+    parser.add_argument("--response", default="",
+                        help="Comma-separated response agent JIDs for CNP auctions (replaces legacy single response)")
+    parser.add_argument("--auto-block", action="store_true",
+                        help="If set, send BLOCK_JID commands to nodes on detections")
     parser.add_argument("--window", type=int, default=10, help="Time window in seconds for rate detection")
     parser.add_argument("--threshold", type=int, default=5, help="Threshold count within window to trigger rate alert")
     args = parser.parse_args()
