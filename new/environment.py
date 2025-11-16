@@ -56,7 +56,7 @@ NODES_PER_ROUTER = 2  # Number of nodes attached to each router
 ROUTER_TOPOLOGY = "ring"  # Options: "ring", "mesh", "star", "line"
 
 # Security agents
-NUM_RESPONSE_AGENTS = 0  # Number of incident response agents (for CNP)
+NUM_RESPONSE_AGENTS = 2  # Number of incident response agents (for CNP)
 
 # ============================================================================
 # ATTACKER CONFIGURATION
@@ -85,7 +85,7 @@ NUM_RESPONSE_AGENTS = 0  # Number of incident response agents (for CNP)
 #
 # No attackers (test routing only):
 # ATTACKERS = []
-#
+
 ATTACKERS = []
 
 # ============================================================================
