@@ -56,7 +56,7 @@ NODES_PER_ROUTER = 2  # Number of nodes attached to each router
 ROUTER_TOPOLOGY = "ring"  # Options: "ring", "mesh", "star", "line"
 
 # Security agents
-NUM_RESPONSE_AGENTS = 2  # Number of incident response agents (for CNP)
+NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
 
 # ============================================================================
 # ATTACKER CONFIGURATION
@@ -85,7 +85,7 @@ NUM_RESPONSE_AGENTS = 2  # Number of incident response agents (for CNP)
 #
 # No attackers (test routing only):
 # ATTACKERS = []
-
+#
 ATTACKERS = []
 
 # ============================================================================
@@ -212,6 +212,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
             node = NodeAgent(node_jid, password)
             # Nodes send to their parent router
             parent_router_jid = f"router{r_idx}@{domain}"
+            node.set("router", parent_router_jid)  # Set router for message routing
             node.set("peers", [parent_router_jid])
             
             # Optional: deterministic resources
@@ -231,19 +232,50 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
                 local_node_count += 1
         _log("environment", f"Router {r_idx} configured with {local_node_count} local nodes")
         
-        # Add PREFIX routes to neighbor subnets (like real network routing)
-        # Instead of knowing individual nodes, router knows: "router1_* goes via router1"
-        neighbors = router_connections[r_idx]
+        # Compute shortest paths to all other routers using BFS
+        # For each destination router, find the next hop on the shortest path
+        direct_neighbors = router_connections[r_idx]
         
-        # Initialize router_neighbors dict for BFS routing with resource awareness
-        router_neighbors = {}
-        for neighbor_idx in neighbors:
-            neighbor_router_jid = f"router{neighbor_idx}@{domain}"
-            # Prefix route: any node matching "router<neighbor>_*" goes via that router
-            prefix = f"router{neighbor_idx}_*"
-            router.add_route(prefix, neighbor_router_jid)
+        # BFS to find shortest path to each router
+        from collections import deque
+        
+        routes_to_add = {}  # destination_router_idx -> next_hop_router_jid
+        router_neighbors = {}  # Track direct neighbors for resource-aware routing
+        
+        for dest_router_idx in range(len(routers)):
+            if dest_router_idx == r_idx:
+                continue  # Skip self
             
-            # Track neighbor resources for BFS (initially use default values)
+            # BFS from current router to destination router
+            queue = deque([(r_idx, [r_idx])])
+            visited = {r_idx}
+            found = False
+            
+            while queue and not found:
+                current_idx, path = queue.popleft()
+                
+                if current_idx == dest_router_idx:
+                    # Found path! The next hop is path[1]
+                    next_hop_idx = path[1]
+                    next_hop_jid = f"router{next_hop_idx}@{domain}"
+                    routes_to_add[dest_router_idx] = next_hop_jid
+                    found = True
+                    break
+                
+                # Explore neighbors
+                for neighbor_idx in router_connections[current_idx]:
+                    if neighbor_idx not in visited:
+                        visited.add(neighbor_idx)
+                        queue.append((neighbor_idx, path + [neighbor_idx]))
+        
+        # Add routes for all destination routers
+        for dest_idx, next_hop_jid in routes_to_add.items():
+            prefix = f"router{dest_idx}_*"
+            router.add_route(prefix, next_hop_jid)
+        
+        # Track direct neighbor resources for BFS (initially use default values)
+        for neighbor_idx in direct_neighbors:
+            neighbor_router_jid = f"router{neighbor_idx}@{domain}"
             router_neighbors[neighbor_router_jid] = {
                 "cpu_usage": 15.0,  # Base router CPU
                 "bandwidth_usage": 8.0  # Base router bandwidth
@@ -384,28 +416,32 @@ async def send_scheduled_messages(
         
         # Find sender node
         sender = None
+        sender_router = None
         for r_idx, n_idx, node_jid, node in nodes:
             if r_idx == from_r and n_idx == from_n:
                 sender = node
+                sender_router = f"router{from_r}@{domain}"
                 break
         
         if not sender:
-            _log("environment", f"⚠️  Sender router{from_r}_node{from_n} not found")
+            _log("environment", f"[WARN] Sender router{from_r}_node{from_n} not found")
             continue
         
-        # Build recipient JID
-        recipient = f"router{to_r}_node{to_n}@{domain}"
+        # Build final destination JID
+        destination = f"router{to_r}_node{to_n}@{domain}"
         
-        # Create a one-shot behavior to send the message
+        # Create a one-shot behavior to send the message through router
         class SendMessageBehaviour(OneShotBehaviour):
             async def run(self):
-                msg = Message(to=recipient)
+                # Send to router with destination metadata
+                msg = Message(to=sender_router)
+                msg.set_metadata("dst", destination)
                 msg.body = msg_body
                 await self.send(msg)
         
         # Add and start the behavior
         sender.add_behaviour(SendMessageBehaviour())
-        _log("environment", f"📨 Scheduled message sent: router{from_r}_node{from_n} → router{to_r}_node{to_n}: {msg_body}")
+        _log("environment", f"[SCHED] Scheduled message sent: router{from_r}_node{from_n} -> router{to_r}_node{to_n}: {msg_body}")
 
 
 def main():

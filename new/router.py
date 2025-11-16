@@ -83,52 +83,59 @@ class RouterAgent(Agent):
 		routing_table = self.get("routing_table") or {}
 		router_neighbors = self.get("router_neighbors") or {}
 		
-		# Check if destination is directly reachable
-		if destination in routing_table:
-			return routing_table[destination]
+		# Extract destination router prefix (e.g., "router3" from "router3_node0@localhost")
+		dest_parts = destination.split("@")[0].split("_")
+		if len(dest_parts) >= 2:
+			dest_router_prefix = dest_parts[0]  # e.g., "router3"
+		else:
+			# Can't determine destination router, fall back to simple routing
+			return None
 		
-		# BFS to find all paths
+		# BFS to find all paths to destination router
 		queue = deque([(str(self.jid), [str(self.jid)], 0.0)])  # (current_router, path, cost)
 		visited = {str(self.jid)}
-		best_paths = {}  # destination -> (next_hop, cost, full_path)
+		best_path = None
+		best_cost = float('inf')
 		
 		while queue:
 			current, path, cost = queue.popleft()
 			
+			# Extract current router prefix
+			current_prefix = current.split("@")[0]
+			
+			# Check if we reached destination router
+			if current_prefix == dest_router_prefix or (len(path) > 1 and path[-1].split("@")[0] == dest_router_prefix):
+				if cost < best_cost:
+					best_cost = cost
+					best_path = path
+				continue
+			
 			# Check all neighbors of current router
-			for next_hop, config in (routing_table.items() if current == str(self.jid) else {}):
-				if next_hop in visited:
-					continue
-				
-				# Calculate resource cost for next_hop
-				resource_cost = 0.0
-				if next_hop in router_neighbors:
-					cpu = router_neighbors[next_hop].get("cpu_usage", 0.0)
-					bw = router_neighbors[next_hop].get("bandwidth_usage", 0.0)
+			if current == str(self.jid):
+				# For the starting router, use router_neighbors
+				for next_hop_jid in router_neighbors.keys():
+					if next_hop_jid in visited:
+						continue
+					
+					# Calculate resource cost for next_hop
+					cpu = router_neighbors[next_hop_jid].get("cpu_usage", 15.0)
+					bw = router_neighbors[next_hop_jid].get("bandwidth_usage", 8.0)
 					resource_cost = (cpu + bw) / 200.0  # Normalize to 0-1
-				
-				# Total cost = hop count + resource weight
-				hop_cost = 1.0
-				total_cost = cost + hop_cost + (resource_cost * 0.5)
-				
-				new_path = path + [next_hop]
-				
-				# If this is the destination
-				if next_hop == destination or destination.startswith(next_hop.split("@")[0]):
-					first_hop = path[1] if len(path) > 1 else next_hop
-					if destination not in best_paths or total_cost < best_paths[destination][1]:
-						best_paths[destination] = (first_hop, total_cost, new_path)
-				
-				# Continue BFS
-				visited.add(next_hop)
-				queue.append((next_hop, new_path, total_cost))
+					
+					# Total cost = hop count + resource weight
+					hop_cost = 1.0
+					total_cost = cost + hop_cost + (resource_cost * 0.5)
+					
+					new_path = path + [next_hop_jid]
+					visited.add(next_hop_jid)
+					queue.append((next_hop_jid, new_path, total_cost))
 		
-		# Return best path if found
-		if destination in best_paths:
-			first_hop, cost, full_path = best_paths[destination]
+		# Return first hop if path found
+		if best_path and len(best_path) > 1:
+			first_hop = best_path[1]
 			# Log the BFS routing decision
-			path_str = " → ".join([p.split("@")[0] for p in full_path])
-			_log("Router", str(self.jid), f"🗺️  BFS route to {destination.split('@')[0]}: {path_str} (cost: {cost:.2f})")
+			path_str = " -> ".join([p.split("@")[0] for p in best_path])
+			_log("Router", str(self.jid), f"[BFS] Route to {destination.split('@')[0]}: {path_str} (cost: {best_cost:.2f})")
 			return first_hop
 		return None
 
@@ -268,8 +275,13 @@ class RouterAgent(Agent):
 				out.body = msg.body
 				out.set_metadata("via", str(self.agent.jid))
 				out.set_metadata("ttl", str(ttl))  # Pass TTL along
+				# Preserve original sender through the routing chain
+				original_sender = msg.get_metadata("original_sender") if msg.metadata else None
+				if not original_sender:
+					original_sender = str(msg.sender)  # First hop: sender is the original sender
+				out.set_metadata("original_sender", original_sender)  # Preserve original sender for replies
 				if fw:
-					sent = await fw.send_through_firewall(dst, out.body, metadata={"via": str(self.agent.jid), "ttl": str(ttl)})
+					sent = await fw.send_through_firewall(dst, out.body, metadata={"via": str(self.agent.jid), "ttl": str(ttl), "original_sender": original_sender})
 					if sent:
 						_log("Router", str(self.agent.jid), f"Forwarded locally to {dst}")
 					else:
@@ -292,26 +304,35 @@ class RouterAgent(Agent):
 				# simple prefix/pattern matching: allow keys ending with '*' to indicate prefix
 				if not next_hop:
 					for pat, nh in routing.items():
-						if pat.endswith("*") and dst.startswith(pat[:-1]):
-							next_hop = nh
-							break
+						if pat.endswith("*"):
+							# Extract destination prefix (e.g., "router3" from "router3_node0@localhost")
+							dst_prefix = dst.split("@")[0].rsplit("_", 1)[0] if "_" in dst.split("@")[0] else dst.split("@")[0]
+							pat_prefix = pat.rstrip("_*")
+							if dst_prefix == pat_prefix:
+								next_hop = nh
+								break
 
 			if not next_hop:
 				_log("Router", str(self.agent.jid), f"No route for {dst}; dropping packet")
 				return
 
 			# Forward to next hop
-			_log("Router", str(self.agent.jid), f"📤 Forwarding to {next_hop.split('@')[0]} → final dest: {dst.split('@')[0]}")
+			_log("Router", str(self.agent.jid), f"[FWD] Forwarding to {next_hop.split('@')[0]} -> final dest: {dst.split('@')[0]}")
 			fwd_body = msg.body
+			# Preserve original_sender through multi-hop routing
+			original_sender = msg.get_metadata("original_sender") if msg.metadata else None
+			if not original_sender:
+				original_sender = str(msg.sender)  # First hop: sender is the original sender
 			# Use firewall helper if present
 			if fw:
-				sent_ok = await fw.send_through_firewall(next_hop, fwd_body, metadata={"dst": dst, "via": str(self.agent.jid), "ttl": str(ttl)})
+				sent_ok = await fw.send_through_firewall(next_hop, fwd_body, metadata={"dst": dst, "via": str(self.agent.jid), "ttl": str(ttl), "original_sender": original_sender})
 			else:
 				fwd = Message(to=next_hop)
 				fwd.body = fwd_body
 				fwd.set_metadata("dst", dst)
 				fwd.set_metadata("via", str(self.agent.jid))
 				fwd.set_metadata("ttl", str(ttl))
+				fwd.set_metadata("original_sender", original_sender)
 				await self.send(fwd)
 				sent_ok = True
 

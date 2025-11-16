@@ -378,7 +378,17 @@ class MonitoringAgent(Agent):
                         _log("MonitoringAgent", str(self.agent.jid), f"Error parsing threat alert: {e}")
                     return
                 
-                # handle monitoring of the message
+                # Check if this is a network copy from router (for monitoring)
+                if protocol == "network-copy":
+                    _log("MonitoringAgent", str(self.agent.jid), f"[MONITOR] Analyzing network message from router: {msg.sender}")
+                    # Process the copied message for threat detection
+                    try:
+                        await self.process_message(msg)
+                    except Exception as e:
+                        _log("MonitoringAgent", str(self.agent.jid), f"ERROR processing network-copy: {e}")
+                    return
+                
+                # handle monitoring of any other message
                 try:
                     await self.process_message(msg)
                 except Exception as e:

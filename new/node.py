@@ -184,10 +184,22 @@ class NodeAgent(Agent):
                     active[tid] = {"end": _now_ts() + 0.3, "load": 1.5}
                     self.agent.set("active_tasks", active)
                     
-                    reply = Message(to=str(msg.sender))
-                    reply.body = "PONG"
-                    await self.send(reply)
-                    _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {msg.sender}")
+                    # Send reply through router instead of directly
+                    router = self.agent.get("router")
+                    if router:
+                        # Use original_sender from metadata if available, otherwise use msg.sender
+                        original_sender = msg.get_metadata("original_sender") or str(msg.sender)
+                        reply = Message(to=router)
+                        reply.set_metadata("dst", original_sender)  # Final destination
+                        reply.body = "PONG"
+                        await self.send(reply)
+                        _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {original_sender} (via router)")
+                    else:
+                        # Fallback: direct send if no router configured
+                        reply = Message(to=str(msg.sender))
+                        reply.body = "PONG"
+                        await self.send(reply)
+                        _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {msg.sender}")
                 elif body.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:", 
                                      "QUARANTINE_ADVISORY:", "ADMIN_ALERT:")):
                     # Handle any firewall control command from incident response
@@ -217,10 +229,24 @@ class NodeAgent(Agent):
                     active[tid] = {"end": _now_ts() + 1.0, "load": 5.0}
                     self.agent.set("active_tasks", active)
                     
-                    reply = Message(to=str(msg.sender))
-                    reply.body = f"RESPONSE: processed '{content.strip()}'"
-                    await self.send(reply)
-                    _log("NodeAgent", str(self.agent.jid), f"Replied to request from {msg.sender}")
+                    # Send reply through router instead of directly
+                    router = self.agent.get("router")
+                    if router:
+                        # Use original_sender from metadata if available, otherwise use msg.sender
+                        original_sender = msg.get_metadata("original_sender") if msg.metadata else None
+                        if not original_sender:
+                            original_sender = str(msg.sender)
+                        reply = Message(to=router)
+                        reply.set_metadata("dst", original_sender)  # Final destination
+                        reply.body = f"RESPONSE: processed '{content.strip()}'"
+                        await self.send(reply)
+                        _log("NodeAgent", str(self.agent.jid), f"Replied to request from {original_sender} (via router)")
+                    else:
+                        # Fallback: direct send if no router configured
+                        reply = Message(to=str(msg.sender))
+                        reply.body = f"RESPONSE: processed '{content.strip()}'"
+                        await self.send(reply)
+                        _log("NodeAgent", str(self.agent.jid), f"Replied to request from {msg.sender}")
                 else:
                     # generic acknowledgement
                     _log("NodeAgent", str(self.agent.jid), "No handler for message body; ignoring or log for manual handling.")
