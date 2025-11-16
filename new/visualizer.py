@@ -47,7 +47,7 @@ class Packet:
     target_pos: Tuple[float, float]
     color: Tuple[int, int, int]
     progress: float = 0.0
-    speed: float = 2.0  # pixels per frame
+    speed: float = 0.8  # Slower: 0.8 pixels per frame instead of 2.0
     ttl: int = 64
 
 
@@ -62,6 +62,8 @@ class NetworkVisualizer:
     CONNECTION_COLOR = (60, 60, 80)
     TEXT_COLOR = (220, 220, 220)
     PACKET_COLOR = (255, 100, 100)
+    LOG_BG_COLOR = (30, 30, 40)
+    LOG_TEXT_COLOR = (200, 200, 200)
     
     def __init__(self, width: int = 1200, height: int = 800):
         """Initialize pygame visualization.
@@ -77,9 +79,13 @@ class NetworkVisualizer:
         pygame.display.set_caption("SPADE Network Simulator")
         
         self.clock = pygame.time.Clock()
-        self.font_small = pygame.font.Font(None, 20)
-        self.font_medium = pygame.font.Font(None, 28)
-        self.font_large = pygame.font.Font(None, 36)
+        self.font_small = pygame.font.Font(None, 18)
+        self.font_medium = pygame.font.Font(None, 24)
+        self.font_large = pygame.font.Font(None, 32)
+        
+        # Layout dimensions
+        self.log_panel_width = 400
+        self.network_width = width - self.log_panel_width
         
         # Network state
         self.agents: Dict[str, Agent] = {}
@@ -87,6 +93,9 @@ class NetworkVisualizer:
         self.router_connections: List[Tuple[str, str]] = []  # (router1_jid, router2_jid)
         self.monitor_connections: List[Tuple[str, str]] = []  # (monitor_jid, router_jid)
         self.packets: deque = deque(maxlen=50)  # Active packets
+        
+        # Log console
+        self.log_messages: deque = deque(maxlen=100)  # Keep last 100 log messages
         
         # Stats
         self.total_messages = 0
@@ -107,12 +116,12 @@ class NetworkVisualizer:
         # Calculate positions - arrange routers in a circle for ring/mesh topologies
         num_routers = len(routers)
         
-        # Center of the router circle
-        center_x = self.width // 2
+        # Center of the router circle (in network area, not including log panel)
+        center_x = self.network_width // 2
         center_y = self.height // 2
         
         # Radius for router circle (larger for more routers)
-        router_radius = min(250, (min(self.width, self.height) - 300) // 2)
+        router_radius = min(200, (min(self.network_width, self.height) - 300) // 2)
         
         # Add routers in a circle
         for r_idx, router_jid, _ in routers:
@@ -130,7 +139,7 @@ class NetworkVisualizer:
                 agent_type='router'
             )
         
-        # Add nodes around their parent routers
+        # Add nodes and monitors around their parent routers
         nodes_per_router = {}
         for r_idx, n_idx, node_jid, _ in nodes:
             if r_idx not in nodes_per_router:
@@ -145,13 +154,20 @@ class NetworkVisualizer:
             router_pos = self.agents[router_jid].position
             num_nodes = len(node_list)
             
-            # Position nodes in a circle around router with better spacing
-            radius = 100  # Distance from router
+            # Calculate router's angle in the circle to position nodes away from center
+            router_angle = (r_idx / num_routers) * 2 * math.pi - (math.pi / 2)
+            
+            # Total agents around this router: nodes + 1 monitor
+            total_satellites = num_nodes + 1  # nodes + monitor
+            satellite_radius = 100  # Distance from router
+            
+            # Position nodes evenly around router
             for i, (n_idx, node_jid) in enumerate(node_list):
-                # Start angle from top and distribute evenly
-                angle = (i / num_nodes) * 2 * math.pi - (math.pi / 2)  # Start from top
-                offset_x = int(radius * math.cos(angle))
-                offset_y = int(radius * math.sin(angle))
+                # Evenly distribute all satellites (nodes + monitor)
+                angle_offset = (i / total_satellites) * 2 * math.pi
+                node_angle = router_angle + angle_offset
+                offset_x = int(satellite_radius * math.cos(node_angle))
+                offset_y = int(satellite_radius * math.sin(node_angle))
                 
                 name = f"N{r_idx}.{n_idx}"
                 self.agents[node_jid] = Agent(
@@ -163,33 +179,26 @@ class NetworkVisualizer:
                 
                 # Add connection between node and router
                 self.connections.append((node_jid, router_jid))
-        
-        # Add monitors - position each monitor between its router and center
-        # This shows monitors as intermediaries between routers and the network core
-        for r_idx, monitor_jid, _ in monitors:
-            router_jid = f"router{r_idx}@{domain}"
-            if router_jid not in self.agents:
-                continue
             
-            # Position monitor halfway between router and center, slightly offset
-            router_pos = self.agents[router_jid].position
-            angle = (r_idx / num_routers) * 2 * math.pi - (math.pi / 2)
-            
-            # Monitor at 60% distance from center (between center and router)
-            monitor_radius = int(router_radius * 0.6)
-            x = center_x + int(monitor_radius * math.cos(angle))
-            y = center_y + int(monitor_radius * math.sin(angle))
-            
-            name = f"M{r_idx}"
-            self.agents[monitor_jid] = Agent(
-                name=name,
-                jid=monitor_jid,
-                position=(x, y),
-                agent_type='monitor'
-            )
-            
-            # Add monitoring connection (monitor to its router)
-            self.monitor_connections.append((monitor_jid, router_jid))
+            # Position monitor as the last satellite in the circle
+            monitor_jid = f"monitor{r_idx}@{domain}"
+            if monitor_jid in [m[1] for m in monitors]:
+                # Monitor takes the last position in the evenly-spaced circle
+                angle_offset = (num_nodes / total_satellites) * 2 * math.pi
+                monitor_angle = router_angle + angle_offset
+                offset_x = int(satellite_radius * math.cos(monitor_angle))
+                offset_y = int(satellite_radius * math.sin(monitor_angle))
+                
+                name = f"M{r_idx}"
+                self.agents[monitor_jid] = Agent(
+                    name=name,
+                    jid=monitor_jid,
+                    position=(router_pos[0] + offset_x, router_pos[1] + offset_y),
+                    agent_type='monitor'
+                )
+                
+                # Add monitoring connection (monitor to its router)
+                self.monitor_connections.append((monitor_jid, router_jid))
         
         # Add router-to-router connections
         for r_idx, neighbors in router_topology.items():
@@ -208,6 +217,7 @@ class NetworkVisualizer:
             ttl: Time to live
         """
         if source_jid not in self.agents or dest_jid not in self.agents:
+            print(f"[VISUALIZER] Cannot add packet: {source_jid} -> {dest_jid} (agent not found)")
             return
         
         source_pos = self.agents[source_jid].position
@@ -223,6 +233,16 @@ class NetworkVisualizer:
         )
         self.packets.append(packet)
         self.total_messages += 1
+        print(f"[VISUALIZER] Added packet: {source_jid} -> {dest_jid} (total packets: {len(self.packets)})")
+    
+    def log_message(self, message: str):
+        """Add a message to the log console.
+        
+        Args:
+            message: Log message to display
+        """
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_messages.append(f"[{timestamp}] {message}")
     
     def update_agent_stats(self, jid: str, cpu: float = None, bandwidth: float = None):
         """Update agent resource statistics.
@@ -266,6 +286,12 @@ class NetworkVisualizer:
     def draw(self):
         """Render the visualization."""
         self.screen.fill(self.BG_COLOR)
+        
+        # Draw log panel background
+        pygame.draw.rect(self.screen, self.LOG_BG_COLOR, 
+                        (self.network_width, 0, self.log_panel_width, self.height))
+        pygame.draw.line(self.screen, (80, 80, 100), 
+                        (self.network_width, 0), (self.network_width, self.height), 2)
         
         # Draw monitor connections (dotted lines to routers)
         for conn in self.monitor_connections:
@@ -317,6 +343,9 @@ class NetworkVisualizer:
         # Draw stats panel
         self._draw_stats_panel()
         
+        # Draw log console
+        self._draw_log_console()
+        
         pygame.display.flip()
         self.clock.tick(60)  # 60 FPS
     
@@ -349,11 +378,18 @@ class NetworkVisualizer:
         self.screen.blit(label, label_rect)
         
         # Draw CPU/BW if node
-        if agent.agent_type == 'node' and (agent.cpu > 0 or agent.bandwidth > 0):
-            stats_text = f"{agent.cpu:.0f}%"
-            stats_label = self.font_small.render(stats_text, True, (200, 200, 100))
-            stats_rect = stats_label.get_rect(center=(x, y + radius + 12))
-            self.screen.blit(stats_label, stats_rect)
+        if agent.agent_type == 'node':
+            # CPU percentage
+            cpu_text = f"CPU: {agent.cpu:.0f}%"
+            cpu_label = self.font_small.render(cpu_text, True, (255, 200, 100))
+            cpu_rect = cpu_label.get_rect(center=(x, y + radius + 12))
+            self.screen.blit(cpu_label, cpu_rect)
+            
+            # BW percentage
+            bw_text = f"BW: {agent.bandwidth:.0f}%"
+            bw_label = self.font_small.render(bw_text, True, (150, 200, 255))
+            bw_rect = bw_label.get_rect(center=(x, y + radius + 26))
+            self.screen.blit(bw_label, bw_rect)
     
     def _draw_stats_panel(self):
         """Draw statistics panel."""
@@ -369,7 +405,35 @@ class NetworkVisualizer:
         for stat in stats:
             text = self.font_small.render(stat, True, self.TEXT_COLOR)
             self.screen.blit(text, (10, y_offset))
-            y_offset += 25
+            y_offset += 22
+    
+    def _draw_log_console(self):
+        """Draw log console panel."""
+        # Title
+        title = self.font_medium.render("Log Console", True, self.TEXT_COLOR)
+        self.screen.blit(title, (self.network_width + 10, 10))
+        
+        # Separator line
+        pygame.draw.line(self.screen, (80, 80, 100),
+                        (self.network_width + 10, 40),
+                        (self.width - 10, 40), 1)
+        
+        # Log messages (scrolled to show most recent)
+        y_offset = 50
+        line_height = 20
+        max_lines = (self.height - 60) // line_height
+        
+        # Show most recent messages (bottom-up)
+        visible_logs = list(self.log_messages)[-max_lines:]
+        
+        for log_msg in visible_logs:
+            # Truncate long messages
+            if len(log_msg) > 50:
+                log_msg = log_msg[:47] + "..."
+            
+            text = self.font_small.render(log_msg, True, self.LOG_TEXT_COLOR)
+            self.screen.blit(text, (self.network_width + 10, y_offset))
+            y_offset += line_height
     
     def handle_events(self) -> bool:
         """Handle pygame events.

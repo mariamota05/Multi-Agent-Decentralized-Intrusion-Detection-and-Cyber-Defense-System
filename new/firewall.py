@@ -10,11 +10,17 @@ Usage:
 
 The behaviour listens for control messages with protocol 'firewall-control' to modify rules
 at runtime. Supported control commands (message body):
-  - BLOCK_JID:<jid>
-  - UNBLOCK_JID:<jid>
-  - BLOCK_KEY:<keyword>
-  - UNBLOCK_KEY:<keyword>
-  - LIST
+  - BLOCK_JID:<jid> - Permanently block a JID
+  - UNBLOCK_JID:<jid> - Remove permanent block
+  - BLOCK_KEY:<keyword> - Block messages containing keyword
+  - UNBLOCK_KEY:<keyword> - Remove keyword block
+  - RATE_LIMIT:<jid>:<rate>msg/s - Throttle messages from JID (e.g., "10msg/s")
+  - TEMP_BLOCK:<jid>:<duration>s - Temporary block (e.g., "30s")
+  - SUSPEND_ACCESS:<jid> - Suspend account (reversible)
+  - UNSUSPEND_ACCESS:<jid> - Restore suspended account
+  - QUARANTINE_ADVISORY:<incident_id> - Log quarantine recommendation
+  - ADMIN_ALERT:<type>:<incident_id>:<jid> - Alert administrators
+  - LIST - List all active rules
 
 The behaviour exposes coroutine helpers:
   - await fw.allow_message(msg) -> bool
@@ -25,8 +31,9 @@ ensure filtering. The behaviour also actively replies to control messages with a
 confirmation.
 """
 
-from typing import Optional, Set
+from typing import Optional, Set, Dict, Any
 import asyncio
+import time
 
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
@@ -46,7 +53,17 @@ class FirewallBehaviour(CyclicBehaviour):
 		super().__init__(*args, **kwargs)
 		self.blocked_jids = set(default_blocked_jids or [])
 		self.blocked_keywords = set(default_blocked_keywords or [])
-		# small queue for requests from other behaviours (optional)
+		
+		# Rate limiting: jid -> {max_per_sec, count, last_reset_time}
+		self.rate_limits: Dict[str, Dict[str, Any]] = {}
+		
+		# Temporary blocks: jid -> expiry_timestamp
+		self.temp_blocks: Dict[str, float] = {}
+		
+		# Suspended accounts: set of JIDs
+		self.suspended_accounts: Set[str] = set()
+		
+		# Command lock for thread safety
 		self._command_lock = asyncio.Lock()
 
 	# Runtime rule management
@@ -65,23 +82,89 @@ class FirewallBehaviour(CyclicBehaviour):
 	async def allow_message(self, msg: Message) -> bool:
 		"""Return True if the message is allowed by the firewall rules.
 
-		Checks sender JID and message body keywords.
+		Checks sender JID and message body keywords. If threats detected,
+		reports to router/monitor for incident response.
+		
+		Also enforces:
+		- Rate limiting (messages per second)
+		- Temporary blocks (time-based expiration)
+		- Account suspensions (reversible blocks)
+		- Permanent JID blocks
+		- Keyword filtering
 		"""
-		# Node/workstation firewall: always inspect incoming messages and apply
-		# blocklists and keyword filters. Nodes should not bypass checks for
-		# intra-subnet traffic.
 		sender = str(msg.sender) if msg.sender is not None else None
-		# attempt to determine destination from metadata or 'to'
 		dst = None
 		if msg.metadata and "dst" in msg.metadata:
 			dst = msg.metadata.get("dst")
 		else:
 			dst = str(msg.to) if msg.to else None
 
+		# WHITELIST: Allow messages from incident response and monitoring agents
+		if sender and ("response" in sender or "monitor" in sender):
+			return True
+		
+		# WHITELIST: Don't scan control/alert messages (prevent infinite loops)
+		protocol = msg.metadata.get("protocol") if msg.metadata else None
+		if protocol in ["firewall-control", "threat-alert", "network-copy"]:
+			return True
+		
+		# CHECK SUSPENDED ACCOUNTS (reversible block)
+		if sender and sender in self.suspended_accounts:
+			return False
+		
+		# CHECK TEMPORARY BLOCKS (expire after duration)
+		if sender and sender in self.temp_blocks:
+			if time.time() < self.temp_blocks[sender]:
+				return False  # Still blocked
+			else:
+				# Expired - remove from temp blocks
+				del self.temp_blocks[sender]
+		
+		# CHECK RATE LIMITS (throttle high-volume senders)
+		if sender and sender in self.rate_limits:
+			limit_data = self.rate_limits[sender]
+			now = time.time()
+			
+			# Reset counter every second
+			if now - limit_data["last_reset"] >= 1.0:
+				limit_data["count"] = 0
+				limit_data["last_reset"] = now
+			
+			# Increment message count
+			limit_data["count"] += 1
+			
+			# Check if over limit
+			if limit_data["count"] > limit_data["max_per_sec"]:
+				return False  # Rate limit exceeded
+
+		# Check for threats in message body
+		body = (msg.body or "")
+		threat_keywords = [
+			"malware", "virus", "exploit", "trojan", "worm",
+			"ransomware", "failed login", "failed_login", "unauthorized"
+		]
+		
+		threat_detected = False
+		detected_keywords = []
+		for kw in threat_keywords:
+			if kw in body.lower():
+				threat_detected = True
+				detected_keywords.append(kw)
+		
+		# If threat detected, report to parent router for monitoring
+		if threat_detected:
+			peers = self.agent.get("peers") or []
+			if peers:
+				router_jid = peers[0]  # Parent router
+				alert_msg = Message(to=router_jid)
+				alert_msg.set_metadata("protocol", "threat-alert")
+				alert_msg.body = f"THREAT from {sender} to {self.agent.jid}: {', '.join(detected_keywords)} - {body[:100]}"
+				await self.send(alert_msg)
+				print(f"[FIREWALL {self.agent.jid}] Threat detected from {sender}, reported to {router_jid}")
+
 		# If sender is explicitly blocked, deny
 		if sender and sender in self.blocked_jids:
 			return False
-		body = (msg.body or "")
 		for kw in self.blocked_keywords:
 			if kw and kw in body:
 				return False
@@ -110,12 +193,22 @@ class FirewallBehaviour(CyclicBehaviour):
 			if kw and kw in body:
 				return False
 
+		# Emit packet event for visualization (node -> router/destination)
+		viz = self.agent.get("_visualizer")
+		if viz:
+			print(f"[FIREWALL] Adding packet: {str(self.agent.jid)} -> {to}")
+			viz.add_packet(str(self.agent.jid), to)
+		
 		msg = Message(to=to)
 		msg.body = body
 		if metadata:
 			for k, v in metadata.items():
 				msg.set_metadata(k, str(v))
 		await self.send(msg)
+		
+		# Small delay to simulate network latency
+		await asyncio.sleep(0.1)
+		
 		# notify agent-level resource monitor (if present) about outbound send
 		try:
 			self.agent._force_pprint = True
@@ -141,6 +234,7 @@ class FirewallBehaviour(CyclicBehaviour):
 		reply = Message(to=str(msg.sender))
 		reply.set_metadata("protocol", "firewall-control")
 
+		# BLOCK_JID - Permanent block
 		if body.upper().startswith("BLOCK_JID:"):
 			jid = body.split(":", 1)[1].strip()
 			self.block_jid(jid)
@@ -148,6 +242,7 @@ class FirewallBehaviour(CyclicBehaviour):
 			await self.send(reply)
 			return
 
+		# UNBLOCK_JID - Remove permanent block
 		if body.upper().startswith("UNBLOCK_JID:"):
 			jid = body.split(":", 1)[1].strip()
 			self.unblock_jid(jid)
@@ -155,6 +250,7 @@ class FirewallBehaviour(CyclicBehaviour):
 			await self.send(reply)
 			return
 
+		# BLOCK_KEY - Block keyword
 		if body.upper().startswith("BLOCK_KEY:"):
 			kw = body.split(":", 1)[1].strip()
 			self.block_keyword(kw)
@@ -162,21 +258,113 @@ class FirewallBehaviour(CyclicBehaviour):
 			await self.send(reply)
 			return
 
+		# UNBLOCK_KEY - Remove keyword block
 		if body.upper().startswith("UNBLOCK_KEY:"):
 			kw = body.split(":", 1)[1].strip()
 			self.unblock_keyword(kw)
 			reply.body = f"OK UNBLOCKED_KEY {kw}"
 			await self.send(reply)
 			return
+		
+		# RATE_LIMIT - Throttle messages per second
+		if body.upper().startswith("RATE_LIMIT:"):
+			parts = body.split(":")
+			if len(parts) >= 3:
+				jid = parts[1].strip()
+				rate_str = parts[2].strip().upper().replace("MSG/S", "").strip()
+				try:
+					max_per_sec = int(rate_str)
+					self.rate_limits[jid] = {
+						"max_per_sec": max_per_sec,
+						"count": 0,
+						"last_reset": time.time()
+					}
+					reply.body = f"OK RATE_LIMITED {jid} to {max_per_sec} msg/s"
+					print(f"[FIREWALL {self.agent.jid}] Rate limit applied: {jid} -> {max_per_sec} msg/s")
+				except ValueError:
+					reply.body = f"ERROR Invalid rate format: {rate_str}"
+			else:
+				reply.body = "ERROR Invalid RATE_LIMIT format (use RATE_LIMIT:jid:10msg/s)"
+			await self.send(reply)
+			return
+		
+		# TEMP_BLOCK - Temporary block with expiration
+		if body.upper().startswith("TEMP_BLOCK:"):
+			parts = body.split(":")
+			if len(parts) >= 3:
+				jid = parts[1].strip()
+				duration_str = parts[2].strip().upper().replace("S", "").strip()
+				try:
+					duration_sec = int(duration_str)
+					expiry = time.time() + duration_sec
+					self.temp_blocks[jid] = expiry
+					reply.body = f"OK TEMP_BLOCKED {jid} for {duration_sec}s"
+					print(f"[FIREWALL {self.agent.jid}] Temporary block: {jid} for {duration_sec}s")
+				except ValueError:
+					reply.body = f"ERROR Invalid duration format: {duration_str}"
+			else:
+				reply.body = "ERROR Invalid TEMP_BLOCK format (use TEMP_BLOCK:jid:30s)"
+			await self.send(reply)
+			return
+		
+		# SUSPEND_ACCESS - Suspend account (reversible)
+		if body.upper().startswith("SUSPEND_ACCESS:"):
+			jid = body.split(":", 1)[1].strip()
+			self.suspended_accounts.add(jid)
+			reply.body = f"OK SUSPENDED {jid}"
+			print(f"[FIREWALL {self.agent.jid}] Account suspended: {jid}")
+			await self.send(reply)
+			return
+		
+		# UNSUSPEND_ACCESS - Restore suspended account
+		if body.upper().startswith("UNSUSPEND_ACCESS:"):
+			jid = body.split(":", 1)[1].strip()
+			self.suspended_accounts.discard(jid)
+			reply.body = f"OK UNSUSPENDED {jid}"
+			print(f"[FIREWALL {self.agent.jid}] Account unsuspended: {jid}")
+			await self.send(reply)
+			return
+		
+		# QUARANTINE_ADVISORY - Log quarantine recommendation (informational)
+		if body.upper().startswith("QUARANTINE_ADVISORY:"):
+			incident_id = body.split(":", 1)[1].strip()
+			print(f"[FIREWALL {self.agent.jid}] 🔒 QUARANTINE ADVISORY: {incident_id}")
+			print(f"[FIREWALL {self.agent.jid}]    Recommendation: Isolate potentially infected systems")
+			reply.body = f"OK QUARANTINE_ADVISORY logged for {incident_id}"
+			await self.send(reply)
+			return
+		
+		# ADMIN_ALERT - Alert administrators (informational)
+		if body.upper().startswith("ADMIN_ALERT:"):
+			parts = body.split(":")
+			if len(parts) >= 3:
+				incident_type = parts[1].strip()
+				incident_id = parts[2].strip()
+				offender = parts[3].strip() if len(parts) > 3 else "unknown"
+				print(f"[FIREWALL {self.agent.jid}] ⚠️  ADMIN ALERT: {incident_type}")
+				print(f"[FIREWALL {self.agent.jid}]    Incident: {incident_id}")
+				print(f"[FIREWALL {self.agent.jid}]    Offender: {offender}")
+				print(f"[FIREWALL {self.agent.jid}]    Action Required: Human review recommended")
+				reply.body = f"OK ADMIN_ALERT sent for {incident_id}"
+			else:
+				print(f"[FIREWALL {self.agent.jid}] ⚠️  ADMIN ALERT: {body}")
+				reply.body = "OK ADMIN_ALERT logged"
+			await self.send(reply)
+			return
 
+		# LIST - Show all active rules
 		if body.upper() == "LIST":
-			lines = ["BLOCKED_JIDS:"] + list(self.blocked_jids) + ["BLOCKED_KEYWORDS:"] + list(self.blocked_keywords)
+			lines = ["BLOCKED_JIDS:"] + list(self.blocked_jids)
+			lines += ["BLOCKED_KEYWORDS:"] + list(self.blocked_keywords)
+			lines += ["SUSPENDED_ACCOUNTS:"] + list(self.suspended_accounts)
+			lines += ["RATE_LIMITS:"] + [f"{jid}: {data['max_per_sec']} msg/s" for jid, data in self.rate_limits.items()]
+			lines += ["TEMP_BLOCKS:"] + [f"{jid}: expires {data - time.time():.1f}s" for jid, data in self.temp_blocks.items()]
 			reply.body = "\n".join(lines)
 			await self.send(reply)
 			return
 
 		# Unknown command
-		reply.body = "ERROR Unknown firewall command"
+		reply.body = f"ERROR Unknown firewall command: {body.split(':')[0]}"
 		await self.send(reply)
 
 
@@ -239,12 +427,22 @@ class RouterFirewallBehaviour(FirewallBehaviour):
 			local_nodes = set()
 		sender_jid = str(self.agent.jid)
 		if local_nodes and sender_jid in local_nodes and to in local_nodes:
+			# Emit packet event for visualization (router -> local node)
+			viz = self.agent.get("_visualizer")
+			if viz:
+				print(f"[ROUTER_FIREWALL] Adding packet: {str(self.agent.jid)} -> {to}")
+				viz.add_packet(str(self.agent.jid), to)
+			
 			msg = Message(to=to)
 			msg.body = body
 			if metadata:
 				for k, v in metadata.items():
 					msg.set_metadata(k, str(v))
 			await self.send(msg)
+			
+			# Small delay to simulate network latency
+			await asyncio.sleep(0.1)
+			
 			# notify resource monitor about this local-forward send as well
 			try:
 				self.agent._force_pprint = True
@@ -264,12 +462,22 @@ class RouterFirewallBehaviour(FirewallBehaviour):
 		for kw in self.blocked_keywords:
 			if kw and kw in body:
 				return False
+		# Emit packet event for visualization (router -> router or router -> external)
+		viz = self.agent.get("_visualizer")
+		if viz:
+			print(f"[ROUTER_FIREWALL_EXTERNAL] Adding packet: {str(self.agent.jid)} -> {to}")
+			viz.add_packet(str(self.agent.jid), to)
+		
 		msg = Message(to=to)
 		msg.body = body
 		if metadata:
 			for k, v in metadata.items():
 				msg.set_metadata(k, str(v))
 		await self.send(msg)
+		
+		# Small delay to simulate network latency
+		await asyncio.sleep(0.1)
+		
 		# notify agent-level resource monitor (if present) about outbound send
 		try:
 			self.agent._force_pprint = True
@@ -282,5 +490,3 @@ class RouterFirewallBehaviour(FirewallBehaviour):
 		except Exception:
 			pass
 		return True
-
-

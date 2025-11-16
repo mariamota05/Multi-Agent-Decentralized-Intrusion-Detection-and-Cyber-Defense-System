@@ -2,30 +2,26 @@
 
 This module creates a configurable network topology with multiple routers
 connected to each other and multiple nodes attached to each router. The topology
-supports inter-router routing and can be easily visualized.
+supports inter-router routing.
 
 Configuration:
-  - NUM_ROUTERS: number of routers in the network
-  - NODES_PER_ROUTER: number of nodes attached to each router
-  - ROUTER_TOPOLOGY: how routers connect ("ring", "mesh", "star", or "line")
+  Edit the variables below to change network topology, attacks, and messages.
 
 Usage:
-  python new/environment.py --domain localhost --password secret --time 10
+  python new/environment.py --domain localhost --password secret --time 30
 
 Structure:
   - MonitoringAgents: one per router for local traffic inspection
   - RouterAgents: interconnected routers (router0, router1, ..., routerN)
   - NodeAgents: local nodes per router (router0_node0, router0_node1, ...)
-
-Future extensions:
-  - pygame visualization with grid layout
-  - dynamic topology reconfiguration
-  - attacker/response agents integration
+  - Response Agents: CNP participants for incident response
+  - Attacker Agents: Simulates malicious behavior
 """
 
 import argparse
 import asyncio
 import os
+import sys
 import json
 import datetime
 from typing import List, Dict, Tuple, Optional
@@ -35,36 +31,89 @@ import spade
 from node import NodeAgent
 from router import RouterAgent
 from monitoring import MonitoringAgent
+from response import IncidentResponseAgent
 
-# Optional pygame visualization
-try:
-    from visualizer import NetworkVisualizer
-    PYGAME_AVAILABLE = True
-except ImportError:
-    PYGAME_AVAILABLE = False
-    NetworkVisualizer = None
+# Import specialized attackers
+from attackers.malware_attacker import MalwareAttacker
+from attackers.ddos_attacker import DDoSAttacker
+from attackers.insider_attacker import InsiderAttacker
 
 
 def _log(hint: str, msg: str) -> None:
     """Uniform log helper for environment script."""
     ts = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [{hint}] {msg}")
+    log_msg = f"[{ts}] [{hint}] {msg}"
+    print(log_msg)
 
 
 # ============================================================================
-# CONFIGURATION - Adjust these to change network topology
+# EASY CONFIGURATION - Edit these variables before running
 # ============================================================================
 
-NUM_ROUTERS = 3  # Number of routers in the network
+# Network topology
+NUM_ROUTERS = 5  # Number of routers in the network
 NODES_PER_ROUTER = 2  # Number of nodes attached to each router
 ROUTER_TOPOLOGY = "ring"  # Options: "ring", "mesh", "star", "line"
 
-# Optional: enable deterministic resource simulation for nodes
-USE_DETERMINISTIC_RESOURCES = False
-RESOURCE_SEED_BASE = 1000  # Base seed for nodes (incremented per node)
+# Security agents
+NUM_RESPONSE_AGENTS = 0  # Number of incident response agents (for CNP)
 
-# Visualization
-ENABLE_VISUALIZATION = True  # Set to False to disable pygame window
+# ============================================================================
+# ATTACKER CONFIGURATION
+# ============================================================================
+
+# List of attackers to spawn
+# Format: [(type, [target_jids], intensity, duration, delay), ...]
+# 
+# Attack types: "stealth_malware", "ddos", "insider_threat"
+# Intensity: 1-10 (higher = more aggressive)
+# Duration: seconds to run the attack
+# Delay: seconds to wait before starting attack
+#
+# Examples:
+# Single attacker:
+# ATTACKERS = [
+#     ("stealth_malware", ["router0_node0@localhost"], 5, 20, 3),
+# ]
+#
+# Multiple attackers:
+# ATTACKERS = [
+#     ("stealth_malware", ["router0_node0@localhost"], 5, 20, 3),
+#     ("ddos", ["router1_node0@localhost"], 8, 15, 5),
+#     ("insider_threat", ["router2_node0@localhost"], 6, 18, 7),
+# ]
+#
+# No attackers (test routing only):
+# ATTACKERS = []
+#
+ATTACKERS = []
+
+# ============================================================================
+# MESSAGE TESTING (optional - for testing routing)
+# ============================================================================
+
+# Scheduled messages - sends test messages between nodes to verify routing
+# Format: [(from_router, from_node, to_router, to_node, message, delay), ...]
+# 
+# Supported message types:
+#   "PING" - Simple connectivity test (node replies with "PONG")
+#   "REQUEST: <text>" - Processing request (node replies with "RESPONSE: <text>")
+#   Any other text - Just delivered to destination (no reply)
+#
+# Examples:
+# SCHEDULED_MESSAGES = [
+#     (0, 0, 1, 1, "PING", 2),                    # Test connectivity after 2 seconds
+#     (1, 1, 2, 0, "REQUEST: status", 5),         # Request processing after 5 seconds
+#     (0, 1, 2, 1, "Hello from router0", 8),      # Custom message after 8 seconds
+# ]
+SCHEDULED_MESSAGES = [(0, 0, 0, 1, "PING", 2), (0, 1, 3, 0, "REQUEST: status", 5) ]  # Leave empty for no test messages
+
+# ============================================================================
+# RESOURCES (usually don't need to change)
+# ============================================================================
+
+USE_DETERMINISTIC_RESOURCES = True  # No randomness
+RESOURCE_SEED_BASE = 1000  # Base seed for nodes
 
 # ============================================================================
 
@@ -115,96 +164,6 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
     return connections
 
 
-def compute_grid_positions(num_routers: int, nodes_per_router: int) -> Dict[str, Tuple[int, int]]:
-    """Compute grid positions for routers and nodes for pygame visualization.
-    
-    Args:
-        num_routers: Number of routers
-        nodes_per_router: Number of nodes per router
-    
-    Returns:
-        Dict mapping agent name -> (x, y) grid position
-    
-    Layout strategy:
-        - Routers placed in a horizontal line or circle
-        - Nodes clustered around their parent router
-    """
-    positions = {}
-    
-    # Simple horizontal layout for routers
-    router_spacing = 200
-    node_offset = 80
-    
-    for r_idx in range(num_routers):
-        router_name = f"router{r_idx}"
-        # Routers on a horizontal line
-        router_x = r_idx * router_spacing + 100
-        router_y = 300
-        positions[router_name] = (router_x, router_y)
-        
-        # Nodes arranged in a small circle around router
-        for n_idx in range(nodes_per_router):
-            node_name = f"router{r_idx}_node{n_idx}"
-            angle = (n_idx / nodes_per_router) * 2 * 3.14159
-            node_x = router_x + int(node_offset * (0.5 + 0.5 * (n_idx % 2)))
-            node_y = router_y + int(node_offset * ((n_idx // 2) - 0.5))
-            positions[node_name] = (node_x, node_y)
-    
-    # Monitor at top center
-    positions["monitor"] = (num_routers * router_spacing // 2, 50)
-    
-    return positions
-
-
-async def update_visualizer_stats(viz, nodes, domain: str):
-    """Update visualizer with live agent resource stats.
-    
-    Args:
-        viz: NetworkVisualizer instance
-        nodes: List of (r_idx, n_idx, node_jid, node_agent) tuples
-        domain: XMPP domain
-    """
-    if not viz:
-        return
-    
-    for r_idx, n_idx, node_jid, node in nodes:
-        try:
-            cpu = node.get("cpu_usage") or 0.0
-            bw = node.get("bandwidth_usage") or 0.0
-            viz.update_agent_stats(node_jid, cpu=cpu, bandwidth=bw)
-        except Exception:
-            pass
-
-
-async def viz_sleep(viz, duration: float, update_stats_fn=None):
-    """Sleep while keeping visualizer responsive.
-    
-    Args:
-        viz: NetworkVisualizer instance (can be None)
-        duration: Sleep duration in seconds
-        update_stats_fn: Optional coroutine to call periodically for stats updates
-    """
-    if not viz:
-        await asyncio.sleep(duration)
-        return
-    
-    start = asyncio.get_event_loop().time()
-    while asyncio.get_event_loop().time() - start < duration:
-        # Handle events
-        viz.handle_events()
-        
-        # Update stats if function provided
-        if update_stats_fn and (asyncio.get_event_loop().time() - start) % 0.5 < 0.016:
-            await update_stats_fn()
-        
-        # Update and draw
-        viz.update()
-        viz.draw()
-        
-        # Small sleep for ~60 FPS
-        await asyncio.sleep(0.016)
-
-
 async def run_environment(domain: str, password: str, run_seconds: int = 15):
     """Create and run the full network environment.
     
@@ -215,31 +174,29 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     """
     _log("environment", f"Building network: {NUM_ROUTERS} routers, {NODES_PER_ROUTER} nodes/router, topology={ROUTER_TOPOLOGY}")
     
-    # Initialize visualizer if enabled
-    viz = None
-    if ENABLE_VISUALIZATION and PYGAME_AVAILABLE:
-        _log("environment", "Starting pygame visualization...")
-        viz = NetworkVisualizer(width=1200, height=800)
-    elif ENABLE_VISUALIZATION and not PYGAME_AVAILABLE:
-        _log("environment", "Pygame not available - install with: pip install pygame")
-    
     # Build router connectivity
     router_connections = build_router_topology(NUM_ROUTERS, ROUTER_TOPOLOGY)
     _log("environment", f"Router topology: {router_connections}")
-    
-    # Compute positions for future visualization
-    positions = compute_grid_positions(NUM_ROUTERS, NODES_PER_ROUTER)
     
     # Create agents
     monitors = []  # One monitor per router
     routers = []
     nodes = []
+    response_agents = []  # CNP participants for incident response
+    attackers = []  # Malicious agents
     
     # Create monitors (one per router)
     for r_idx in range(NUM_ROUTERS):
         monitor_jid = f"monitor{r_idx}@{domain}"
         monitor = MonitoringAgent(monitor_jid, password)
         monitors.append((r_idx, monitor_jid, monitor))
+    
+    # Create response agents (for CNP)
+    for resp_idx in range(NUM_RESPONSE_AGENTS):
+        response_jid = f"response{resp_idx}@{domain}"
+        response = IncidentResponseAgent(response_jid, password)
+        response_agents.append((resp_idx, response_jid, response))
+        _log("environment", f"Created response agent {resp_idx}: {response_jid}")
     
     # Create routers
     for r_idx in range(NUM_ROUTERS):
@@ -277,22 +234,78 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
         # Add PREFIX routes to neighbor subnets (like real network routing)
         # Instead of knowing individual nodes, router knows: "router1_* goes via router1"
         neighbors = router_connections[r_idx]
+        
+        # Initialize router_neighbors dict for BFS routing with resource awareness
+        router_neighbors = {}
         for neighbor_idx in neighbors:
             neighbor_router_jid = f"router{neighbor_idx}@{domain}"
             # Prefix route: any node matching "router<neighbor>_*" goes via that router
             prefix = f"router{neighbor_idx}_*"
             router.add_route(prefix, neighbor_router_jid)
+            
+            # Track neighbor resources for BFS (initially use default values)
+            router_neighbors[neighbor_router_jid] = {
+                "cpu_usage": 15.0,  # Base router CPU
+                "bandwidth_usage": 8.0  # Base router bandwidth
+            }
         
-        # Set local monitor for this router
+        # Set router_neighbors for BFS path finding
+        router.set("router_neighbors", router_neighbors)
+        
+        # Set local monitor for this router with CNP response agents
         local_monitor_jid = f"monitor{r_idx}@{domain}"
         router.set("monitor_jids", [local_monitor_jid])
         router.set("internal_monitor_jids", [local_monitor_jid])
+    
+    # Configure monitors with CNP response agents
+    response_jids = [resp_jid for _, resp_jid, _ in response_agents]
+    for r_idx, monitor_jid, monitor in monitors:
+        monitor.set("response_jids", response_jids)
+        # Give monitors list of all nodes to protect
+        all_node_jids = [node_jid for _, _, node_jid, _ in nodes]
+        monitor.set("nodes_to_notify", all_node_jids)
+        _log("environment", f"Monitor {r_idx} configured with {len(response_jids)} response agents")
+    
+    # Configure response agents with nodes they can protect
+    all_node_jids = [node_jid for _, _, node_jid, _ in nodes]
+    for resp_idx, response_jid, response in response_agents:
+        response.set("nodes_to_protect", all_node_jids)
+    
+    # Create attacker agents from ATTACKERS list
+    for att_idx, (att_type, targets, intensity, duration, delay) in enumerate(ATTACKERS):
+        attacker_jid = f"attacker{att_idx}@{domain}"
+        
+        # Select specialized attacker based on type
+        if att_type == "stealth_malware":
+            attacker = MalwareAttacker(attacker_jid, password)
+            _log("environment", f"🦠 Created MALWARE attacker {att_idx}: {attacker_jid}")
+        elif att_type == "ddos":
+            attacker = DDoSAttacker(attacker_jid, password)
+            _log("environment", f"💥 Created DDoS attacker {att_idx}: {attacker_jid}")
+        elif att_type == "insider_threat":
+            attacker = InsiderAttacker(attacker_jid, password)
+            _log("environment", f"👤 Created INSIDER THREAT attacker {att_idx}: {attacker_jid}")
+        else:
+            _log("environment", f"⚠️  Unknown attacker type '{att_type}' - defaulting to malware")
+            attacker = MalwareAttacker(attacker_jid, password)
+        
+        attacker.set("targets", targets)
+        attacker.set("intensity", intensity)
+        attacker.set("duration", duration)
+        attackers.append((att_idx, attacker_jid, attacker, delay))
+        _log("environment", f"   Targeting: {targets}")
+        _log("environment", f"   Intensity: {intensity}/10, Duration: {duration}s, Delay: {delay}s")
     
     # Start all agents
     _log("environment", f"Starting {NUM_ROUTERS} monitors (one per router)...")
     for r_idx, monitor_jid, monitor in monitors:
         await monitor.start(auto_register=True)
         _log("environment", f"Monitor {r_idx} started for router {r_idx}")
+    
+    _log("environment", f"Starting {NUM_RESPONSE_AGENTS} response agents...")
+    for resp_idx, response_jid, response in response_agents:
+        await response.start(auto_register=True)
+        _log("environment", f"Response agent {resp_idx} started")
     
     _log("environment", f"Starting {NUM_ROUTERS} routers...")
     for r_idx, router_jid, router in routers:
@@ -304,214 +317,95 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
         parent_router = f"router{r_idx}@{domain}"
         _log("environment", f"Node {node_jid} connected to {parent_router}")
     
+    # Schedule messages if configured
+    if SCHEDULED_MESSAGES:
+        _log("environment", f"Scheduling {len(SCHEDULED_MESSAGES)} test messages...")
+        asyncio.create_task(send_scheduled_messages(nodes, SCHEDULED_MESSAGES, domain))
+    
+    # Start attacker agents with staggered delays
+    if ATTACKERS:
+        asyncio.create_task(start_attackers_delayed(attackers))
+    
     _log("environment", "All agents started. Network is live.")
     
-    # Set up visualizer topology
-    if viz:
-        viz.set_topology(routers, nodes, monitors, router_connections, domain)
-        _log("environment", "Pygame visualization ready")
-    
-    # Allow behaviours to initialize and first resource stats to be calculated
-    # Keep visualizer responsive during initialization
-    await viz_sleep(viz, 3.0, lambda: update_visualizer_stats(viz, nodes, domain))
-    
-    # Update visualizer with initial resource stats
-    if viz:
-        await update_visualizer_stats(viz, nodes, domain)
-    
-    # Send multiple test messages to demonstrate different routing scenarios
-    _log("environment", "=== Starting Test Message Scenarios ===")
-    
-    # Test 1: Cross-router message (router0 -> router2)
-    if NUM_ROUTERS >= 3 and NODES_PER_ROUTER >= 1:
-        _log("environment", "Test 1: Cross-router message (router0_node0 -> router2_node0)")
-        sender_node = None
-        for r_idx, n_idx, node_jid, node in nodes:
-            if r_idx == 0 and n_idx == 0:
-                sender_node = node
-                break
-        
-        if sender_node:
-            dest_jid = f"router2_node0@{domain}"
-            parent_router = f"router0@{domain}"
-            task_meta = {"duration": 2.0, "cpu_load": 15.0}
-            
-            fw = sender_node.get("firewall")
-            if fw:
-                sent = await fw.send_through_firewall(
-                    parent_router,
-                    f"[Test 1] Cross-router: Hello from router0_node0!",
-                    metadata={"dst": dest_jid, "task": json.dumps(task_meta), "ttl": "64"},
-                )
-                _log("environment", f"Test 1 sent: {sent}")
-                if viz:
-                    # Cross-router: node0 -> router0 -> monitor0 (inspect) -> router2 -> monitor2 (inspect) -> node0
-                    viz.add_packet(f"router0_node0@{domain}", f"router0@{domain}")
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router0@{domain}", f"monitor0@{domain}")  # Router sends to monitor
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"monitor0@{domain}", f"router2@{domain}")  # Monitor forwards to next router
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router2@{domain}", f"monitor2@{domain}")  # Router2 sends to its monitor
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"monitor2@{domain}", dest_jid)  # Monitor delivers to local node
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-    
-    await viz_sleep(viz, 1.5)
-    
-    # Test 2: Intra-router message (same subnet)
-    if NODES_PER_ROUTER >= 2:
-        _log("environment", "Test 2: Intra-router message (router1_node0 -> router1_node1)")
-        sender_node = None
-        for r_idx, n_idx, node_jid, node in nodes:
-            if r_idx == 1 and n_idx == 0:
-                sender_node = node
-                break
-        
-        if sender_node:
-            dest_jid = f"router1_node1@{domain}"
-            parent_router = f"router1@{domain}"
-            task_meta = {"duration": 1.0, "cpu_load": 10.0}
-            
-            fw = sender_node.get("firewall")
-            if fw:
-                sent = await fw.send_through_firewall(
-                    parent_router,
-                    f"[Test 2] Intra-router: Hello neighbor!",
-                    metadata={"dst": dest_jid, "task": json.dumps(task_meta), "ttl": "64"},
-                )
-                _log("environment", f"Test 2 sent: {sent}")
-                if viz:
-                    # Intra-router: node0 -> router1 -> monitor1 (inspect) -> node1
-                    viz.add_packet(f"router1_node0@{domain}", f"router1@{domain}")
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router1@{domain}", f"monitor1@{domain}")  # Router sends to monitor
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"monitor1@{domain}", dest_jid)  # Monitor delivers to local node
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-    
-    await viz_sleep(viz, 1.5)
-    
-    # Test 3: Adjacent router message (router0 -> router1)
-    if NUM_ROUTERS >= 2 and NODES_PER_ROUTER >= 1:
-        _log("environment", "Test 3: Adjacent router message (router0_node1 -> router1_node0)")
-        sender_node = None
-        for r_idx, n_idx, node_jid, node in nodes:
-            if r_idx == 0 and n_idx == 1:
-                sender_node = node
-                break
-        
-        if sender_node:
-            dest_jid = f"router1_node0@{domain}"
-            parent_router = f"router0@{domain}"
-            task_meta = {"duration": 1.5, "cpu_load": 12.0}
-            
-            fw = sender_node.get("firewall")
-            if fw:
-                sent = await fw.send_through_firewall(
-                    parent_router,
-                    f"[Test 3] Adjacent router: Quick message!",
-                    metadata={"dst": dest_jid, "task": json.dumps(task_meta), "ttl": "64"},
-                )
-                _log("environment", f"Test 3 sent: {sent}")
-                if viz:
-                    # Adjacent router: node1 -> router0 -> monitor0 (inspect) -> router1 -> monitor1 (inspect) -> node0
-                    viz.add_packet(f"router0_node1@{domain}", f"router0@{domain}")
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router0@{domain}", f"monitor0@{domain}")  # Router sends to monitor
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"monitor0@{domain}", f"router1@{domain}")  # Monitor forwards to next router
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router1@{domain}", f"monitor1@{domain}")  # Router1 sends to its monitor
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"monitor1@{domain}", dest_jid)  # Monitor delivers to local node
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-    
-    await viz_sleep(viz, 1.5)
-    
-    # Test 4: Low TTL message (should expire if multi-hop)
-    if NUM_ROUTERS >= 3 and NODES_PER_ROUTER >= 1:
-        _log("environment", "Test 4: Low TTL message (router0_node0 -> router2_node0, TTL=1)")
-        sender_node = None
-        for r_idx, n_idx, node_jid, node in nodes:
-            if r_idx == 0 and n_idx == 0:
-                sender_node = node
-                break
-        
-        if sender_node:
-            dest_jid = f"router2_node0@{domain}"
-            parent_router = f"router0@{domain}"
-            
-            fw = sender_node.get("firewall")
-            if fw:
-                sent = await fw.send_through_firewall(
-                    parent_router,
-                    f"[Test 4] Low TTL: This should expire if not direct route!",
-                    metadata={"dst": dest_jid, "ttl": "1"},  # TTL=1, will expire after 1 hop
-                )
-                _log("environment", f"Test 4 sent: {sent}")
-                if viz:
-                    # Low TTL: node0 -> router0 -> monitor0 (inspect, TTL=1) -> router2 (expires)
-                    viz.add_packet(f"router0_node0@{domain}", f"router0@{domain}", ttl=1)
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"router0@{domain}", f"monitor0@{domain}", ttl=1)  # Monitor inspects
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    viz.add_packet(f"monitor0@{domain}", f"router2@{domain}", ttl=0)  # Forwarded but TTL=0, will expire
-                    await viz_sleep(viz, 0.4, lambda: update_visualizer_stats(viz, nodes, domain))
-                    # Packet expires at router2, won't reach monitor2 or destination
-    
-    await viz_sleep(viz, 1.0)
-    _log("environment", "=== All Test Messages Sent ===")
-    
-    # Run with visualization loop or simple sleep
+    # Run for specified duration
     _log("environment", f"Network running for {run_seconds} seconds...")
-    
-    if viz:
-        # Visualization loop with continuous resource updates
-        start_time = asyncio.get_event_loop().time()
-        last_stats_update = start_time
-        stats_update_interval = 0.5  # Update stats every 0.5 seconds
-        
-        while True:
-            # Handle pygame events
-            if not viz.handle_events():
-                _log("environment", "Visualization window closed by user")
-                break
-            
-            # Update agent stats periodically
-            current_time = asyncio.get_event_loop().time()
-            if current_time - last_stats_update >= stats_update_interval:
-                await update_visualizer_stats(viz, nodes, domain)
-                last_stats_update = current_time
-            
-            # Update and draw
-            viz.update()
-            viz.draw()
-            
-            # Check if time expired
-            if current_time - start_time > run_seconds:
-                break
-            
-            # Small async sleep to allow other tasks
-            await asyncio.sleep(0.016)  # ~60 FPS
-    else:
-        # No visualization - just sleep
-        await asyncio.sleep(run_seconds)
+    await asyncio.sleep(run_seconds)
     
     # Stop all agents
     _log("environment", "Stopping all agents...")
+    if ATTACKERS:
+        for att_idx, attacker_jid, attacker, _ in attackers:
+            await attacker.stop()
     for r_idx, n_idx, node_jid, node in nodes:
         await node.stop()
     for r_idx, router_jid, router in routers:
         await router.stop()
+    for resp_idx, response_jid, response in response_agents:
+        await response.stop()
     for r_idx, monitor_jid, monitor in monitors:
         await monitor.stop()
     
-    # Close visualization
-    if viz:
-        viz.close()
-    
     _log("environment", "Environment stopped. Goodbye.")
+
+
+async def start_attackers_delayed(attackers: List[Tuple[int, str, object, int]]):
+    """Start attackers with individual delays.
+    
+    Args:
+        attackers: List of (idx, jid, agent, delay) tuples
+    """
+    for att_idx, attacker_jid, attacker, delay in attackers:
+        if delay > 0:
+            _log("environment", f"Waiting {delay}s before starting attacker {att_idx}...")
+            await asyncio.sleep(delay)
+        await attacker.start(auto_register=True)
+        att_type = type(attacker).__name__.replace("Attacker", "")
+        _log("environment", f"Attacker {att_idx} started: {att_type} attack")
+
+
+async def send_scheduled_messages(
+    nodes: List[Tuple[int, int, str, object]],
+    messages: List[Tuple[int, int, int, int, str, int]],
+    domain: str
+):
+    """Send scheduled test messages.
+    
+    Args:
+        nodes: List of (router_idx, node_idx, jid, agent) tuples
+        messages: List of (from_router, from_node, to_router, to_node, message, delay) tuples
+        domain: XMPP domain
+    """
+    from spade.message import Message
+    from spade.behaviour import OneShotBehaviour
+    
+    for from_r, from_n, to_r, to_n, msg_body, delay in messages:
+        await asyncio.sleep(delay)
+        
+        # Find sender node
+        sender = None
+        for r_idx, n_idx, node_jid, node in nodes:
+            if r_idx == from_r and n_idx == from_n:
+                sender = node
+                break
+        
+        if not sender:
+            _log("environment", f"⚠️  Sender router{from_r}_node{from_n} not found")
+            continue
+        
+        # Build recipient JID
+        recipient = f"router{to_r}_node{to_n}@{domain}"
+        
+        # Create a one-shot behavior to send the message
+        class SendMessageBehaviour(OneShotBehaviour):
+            async def run(self):
+                msg = Message(to=recipient)
+                msg.body = msg_body
+                await self.send(msg)
+        
+        # Add and start the behavior
+        sender.add_behaviour(SendMessageBehaviour())
+        _log("environment", f"📨 Scheduled message sent: router{from_r}_node{from_n} → router{to_r}_node{to_n}: {msg_body}")
 
 
 def main():

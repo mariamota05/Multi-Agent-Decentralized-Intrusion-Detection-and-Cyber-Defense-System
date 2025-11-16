@@ -75,6 +75,24 @@ class NodeAgent(Agent):
                         _log("NodeAgent", str(self.agent.jid), f"Firewall blocked inbound message from {msg.sender}")
                         return
                 _log("NodeAgent", str(self.agent.jid), f"Received from {msg.sender}: {msg.body}")
+                
+                # Emit packet event for visualization (router -> node)
+                viz = self.agent.get("_visualizer")
+                if viz and msg.metadata and msg.metadata.get("via"):
+                    via = msg.metadata.get("via")
+                    viz.add_packet(via, str(self.agent.jid))
+                
+                # EVERY message processing consumes base resources
+                # Add a small processing task for receiving and parsing the message
+                active = self.agent.get("active_tasks") or {}
+                counter = self.agent.get("task_counter") or 0
+                counter += 1
+                tid = f"recv-{counter}"
+                self.agent.set("task_counter", counter)
+                # Base message processing: 2% CPU for 0.5 seconds
+                active[tid] = {"end": _now_ts() + 0.5, "load": 2.0}
+                self.agent.set("active_tasks", active)
+                
                 # notify resource monitor that something happened (message arrived)
                 try:
                     self.agent._force_pprint = True
@@ -156,12 +174,49 @@ class NodeAgent(Agent):
                 # simple protocol handling for legacy/plain messages
                 body = body_text
                 if body.upper() == "PING":
+                    # Sending a reply also consumes resources
+                    active = self.agent.get("active_tasks") or {}
+                    counter = self.agent.get("task_counter") or 0
+                    counter += 1
+                    tid = f"send-{counter}"
+                    self.agent.set("task_counter", counter)
+                    # Sending: 1.5% CPU for 0.3 seconds
+                    active[tid] = {"end": _now_ts() + 0.3, "load": 1.5}
+                    self.agent.set("active_tasks", active)
+                    
                     reply = Message(to=str(msg.sender))
                     reply.body = "PONG"
                     await self.send(reply)
                     _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {msg.sender}")
+                elif body.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:", 
+                                     "QUARANTINE_ADVISORY:", "ADMIN_ALERT:")):
+                    # Handle any firewall control command from incident response
+                    fw = self.agent.get("firewall")
+                    if fw:
+                        # Forward to firewall by creating a control message
+                        control_msg = Message(to=str(self.agent.jid))
+                        control_msg.set_metadata("protocol", "firewall-control")
+                        control_msg.body = body
+                        control_msg.sender = msg.sender  # Preserve original sender
+                        await fw._handle_control(control_msg)
+                        
+                        # Log specific command type
+                        cmd_type = body.split(":", 1)[0]
+                        _log("NodeAgent", str(self.agent.jid), f"Processed firewall command: {cmd_type}")
+                    else:
+                        _log("NodeAgent", str(self.agent.jid), "No firewall available to process command")
                 elif body.startswith("REQUEST:"):
                     content = body.split("REQUEST:", 1)[1]
+                    # Processing a request consumes more CPU
+                    active = self.agent.get("active_tasks") or {}
+                    counter = self.agent.get("task_counter") or 0
+                    counter += 1
+                    tid = f"proc-{counter}"
+                    self.agent.set("task_counter", counter)
+                    # Request processing: 5% CPU for 1 second (more intensive)
+                    active[tid] = {"end": _now_ts() + 1.0, "load": 5.0}
+                    self.agent.set("active_tasks", active)
+                    
                     reply = Message(to=str(msg.sender))
                     reply.body = f"RESPONSE: processed '{content.strip()}'"
                     await self.send(reply)
@@ -206,13 +261,13 @@ class NodeAgent(Agent):
             adjust = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
             # Use deterministic base values if agent configured them (resource_seed or fixed_base_cpu/bw)
             try:
-                base_cpu = float(self.agent.get("base_cpu", random.uniform(5.0, 15.0))) + adjust
+                base_cpu = float(self.agent.get("base_cpu", 10.0)) + adjust
             except Exception:
-                base_cpu = random.uniform(5.0, 15.0) + adjust
+                base_cpu = 10.0 + adjust
             try:
-                base_bw = float(self.agent.get("base_bw", random.uniform(2.0, 10.0)))
+                base_bw = float(self.agent.get("base_bw", 5.0))
             except Exception:
-                base_bw = random.uniform(2.0, 10.0)
+                base_bw = 5.0
             cpu_usage = min(100.0, base_cpu)
             bw_usage = min(100.0, base_bw)
             self.agent.set("cpu_usage", cpu_usage)
@@ -245,13 +300,13 @@ class NodeAgent(Agent):
 
             # Use configured deterministic base values when available
             try:
-                base_cpu = float(self.agent.get("base_cpu", random.uniform(5.0, 15.0)))
+                base_cpu = float(self.agent.get("base_cpu", 10.0))
             except Exception:
-                base_cpu = random.uniform(5.0, 15.0)
+                base_cpu = 10.0
             try:
-                base_bw = float(self.agent.get("base_bw", random.uniform(2.0, 10.0)))
+                base_bw = float(self.agent.get("base_bw", 5.0))
             except Exception:
-                base_bw = random.uniform(2.0, 10.0)
+                base_bw = 5.0
 
             # include any one-shot send adjustment when reporting
             send_adj = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
@@ -269,6 +324,10 @@ class NodeAgent(Agent):
                 if active:
                     # small, compact list of active task ids
                     _log("NodeAgent", str(self.agent.jid), f"Active tasks: {', '.join(list(active.keys()))}")
+                # Update visualizer with resource stats
+                viz = self.agent.get("_visualizer")
+                if viz:
+                    viz.update_agent_stats(str(self.agent.jid), cpu=cpu_usage, bandwidth=bw_usage)
                 try:
                     # clear the force flag after printing
                     if force:
@@ -324,6 +383,10 @@ class NodeAgent(Agent):
                     _log("NodeAgent", str(self.agent.jid), f"Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
                     if active:
                         _log("NodeAgent", str(self.agent.jid), f"Active tasks: {', '.join(list(active.keys()))}")
+                    # Update visualizer with resource stats
+                    viz = self.agent.get("_visualizer")
+                    if viz:
+                        viz.update_agent_stats(str(self.agent.jid), cpu=cpu_usage, bandwidth=bw_usage)
                     # clear any force flag and one-shot send adjustment
                     try:
                         self.agent._force_pprint = False
@@ -374,26 +437,17 @@ class NodeAgent(Agent):
         self.set("task_counter", 0)
 
         # deterministic resource baseline option: set base_cpu/base_bw once if configured
-        try:
-            seed = self.get("resource_seed", None)
-            if seed is not None:
-                rng = random.Random(seed)
-            else:
-                rng = random
+        # No randomness - use fixed base values
+        if not self.get("base_cpu"):
             if self.get("fixed_base_cpu") is not None:
-                base_cpu_val = float(self.get("fixed_base_cpu"))
+                self.set("base_cpu", float(self.get("fixed_base_cpu")))
             else:
-                base_cpu_val = rng.uniform(5.0, 15.0)
+                self.set("base_cpu", 10.0)
+        if not self.get("base_bw"):
             if self.get("fixed_base_bw") is not None:
-                base_bw_val = float(self.get("fixed_base_bw"))
+                self.set("base_bw", float(self.get("fixed_base_bw")))
             else:
-                base_bw_val = rng.uniform(2.0, 10.0)
-            self.set("base_cpu", base_cpu_val)
-            self.set("base_bw", base_bw_val)
-            if seed is not None or self.get("fixed_base_cpu") is not None:
-                _log("NodeAgent", str(self.jid), f"Resource baseline set: base_cpu={base_cpu_val:.2f} base_bw={base_bw_val:.2f} (seed={seed})")
-        except Exception:
-            pass
+                self.set("base_bw", 5.0)
 
         # resource simulation behaviour (event-driven)
         res = self.ResourceBehav()
