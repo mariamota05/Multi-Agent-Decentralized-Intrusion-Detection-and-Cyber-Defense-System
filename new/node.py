@@ -74,7 +74,11 @@ class NodeAgent(Agent):
                     if not allowed:
                         _log("NodeAgent", str(self.agent.jid), f"Firewall blocked inbound message from {msg.sender}")
                         return
-                _log("NodeAgent", str(self.agent.jid), f"Received from {msg.sender}: {msg.body}")
+                
+                # Don't log firewall control messages (they're internal)
+                protocol = msg.get_metadata("protocol") if msg.metadata else None
+                if protocol != "firewall-control":
+                    _log("NodeAgent", str(self.agent.jid), f"Received from {msg.sender}: {msg.body}")
                 
                 # Emit packet event for visualization (router -> node)
                 viz = self.agent.get("_visualizer")
@@ -211,10 +215,6 @@ class NodeAgent(Agent):
                         control_msg.body = body
                         control_msg.sender = msg.sender  # Preserve original sender
                         await fw._handle_control(control_msg)
-                        
-                        # Log specific command type
-                        cmd_type = body.split(":", 1)[0]
-                        _log("NodeAgent", str(self.agent.jid), f"Processed firewall command: {cmd_type}")
                     else:
                         _log("NodeAgent", str(self.agent.jid), "No firewall available to process command")
                 elif body.startswith("REQUEST:"):

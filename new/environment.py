@@ -86,7 +86,7 @@ NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
 # No attackers (test routing only):
 # ATTACKERS = []
 #
-ATTACKERS = []
+ATTACKERS = [("stealth_malware", ["router0_node0@localhost"], 5, 20, 3)]
 
 # ============================================================================
 # MESSAGE TESTING (optional - for testing routing)
@@ -106,7 +106,7 @@ ATTACKERS = []
 #     (1, 1, 2, 0, "REQUEST: status", 5),         # Request processing after 5 seconds
 #     (0, 1, 2, 1, "Hello from router0", 8),      # Custom message after 8 seconds
 # ]
-SCHEDULED_MESSAGES = [(0, 0, 0, 1, "PING", 2), (0, 1, 3, 0, "REQUEST: status", 5) ]  # Leave empty for no test messages
+SCHEDULED_MESSAGES = []  # Leave empty for no test messages
 
 # ============================================================================
 # RESOURCES (usually don't need to change)
@@ -310,15 +310,15 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
         # Select specialized attacker based on type
         if att_type == "stealth_malware":
             attacker = MalwareAttacker(attacker_jid, password)
-            _log("environment", f"🦠 Created MALWARE attacker {att_idx}: {attacker_jid}")
+            _log("environment", f"[MALWARE] Created MALWARE attacker {att_idx}: {attacker_jid}")
         elif att_type == "ddos":
             attacker = DDoSAttacker(attacker_jid, password)
-            _log("environment", f"💥 Created DDoS attacker {att_idx}: {attacker_jid}")
+            _log("environment", f"[DDOS] Created DDoS attacker {att_idx}: {attacker_jid}")
         elif att_type == "insider_threat":
             attacker = InsiderAttacker(attacker_jid, password)
-            _log("environment", f"👤 Created INSIDER THREAT attacker {att_idx}: {attacker_jid}")
+            _log("environment", f"[INSIDER] Created INSIDER THREAT attacker {att_idx}: {attacker_jid}")
         else:
-            _log("environment", f"⚠️  Unknown attacker type '{att_type}' - defaulting to malware")
+            _log("environment", f"[!] Unknown attacker type '{att_type}' - defaulting to malware")
             attacker = MalwareAttacker(attacker_jid, password)
         
         attacker.set("targets", targets)

@@ -137,8 +137,17 @@ class FirewallBehaviour(CyclicBehaviour):
 			if limit_data["count"] > limit_data["max_per_sec"]:
 				return False  # Rate limit exceeded
 
-		# Check for threats in message body
+		# CHECK PERMANENT BLOCKS FIRST (don't waste time analyzing blocked senders)
 		body = (msg.body or "")
+		if sender and sender in self.blocked_jids:
+			return False  # Permanently blocked - no need to check threats
+		
+		# Check blocked keywords
+		for kw in self.blocked_keywords:
+			if kw and kw in body:
+				return False
+
+		# Check for threats in message body (only for non-blocked senders)
 		threat_keywords = [
 			"malware", "virus", "exploit", "trojan", "worm",
 			"ransomware", "failed login", "failed_login", "unauthorized"
@@ -151,7 +160,7 @@ class FirewallBehaviour(CyclicBehaviour):
 				threat_detected = True
 				detected_keywords.append(kw)
 		
-		# If threat detected, report to parent router for monitoring
+		# If threat detected from NEW sender, report to parent router for monitoring
 		if threat_detected:
 			peers = self.agent.get("peers") or []
 			if peers:
@@ -161,13 +170,7 @@ class FirewallBehaviour(CyclicBehaviour):
 				alert_msg.body = f"THREAT from {sender} to {self.agent.jid}: {', '.join(detected_keywords)} - {body[:100]}"
 				await self.send(alert_msg)
 				print(f"[FIREWALL {self.agent.jid}] Threat detected from {sender}, reported to {router_jid}")
-
-		# If sender is explicitly blocked, deny
-		if sender and sender in self.blocked_jids:
-			return False
-		for kw in self.blocked_keywords:
-			if kw and kw in body:
-				return False
+		
 		return True
 
 	async def send_through_firewall(self, to: str, body: str, metadata: Optional[dict] = None) -> bool:
@@ -327,9 +330,10 @@ class FirewallBehaviour(CyclicBehaviour):
 		
 		# QUARANTINE_ADVISORY - Log quarantine recommendation (informational)
 		if body.upper().startswith("QUARANTINE_ADVISORY:"):
-			incident_id = body.split(":", 1)[1].strip()
-			print(f"[FIREWALL {self.agent.jid}] 🔒 QUARANTINE ADVISORY: {incident_id}")
-			print(f"[FIREWALL {self.agent.jid}]    Recommendation: Isolate potentially infected systems")
+			# Silently acknowledge - nodes could implement isolation procedures here
+			reply.body = "OK QUARANTINE_ACKNOWLEDGED"
+			await self.send(reply)
+			return
 			reply.body = f"OK QUARANTINE_ADVISORY logged for {incident_id}"
 			await self.send(reply)
 			return

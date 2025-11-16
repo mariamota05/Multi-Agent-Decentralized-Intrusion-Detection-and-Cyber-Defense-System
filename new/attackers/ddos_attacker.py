@@ -11,12 +11,12 @@ WHAT IT DOES:
   • CPU load: intensity × 3% for 2 seconds per message
 
 WHY THIS RESPONSE?
-  ✓ Rate limiting first (10 msg/s) - proportionate response
-  ✓ Temporary 30s block - gives time for flood to subside
-  ✓ Monitoring scheduled - watch for sustained patterns
-  ✓ Not permanent - source might be spoofed/botnet
+  [+] Rate limiting first (10 msg/s) - proportionate response
+  [+] Temporary 30s block - gives time for flood to subside
+  [+] Monitoring scheduled - watch for sustained patterns
+  [+] Not permanent - source might be spoofed/botnet
 
-RISK LEVEL: ⚠️ MEDIUM
+RISK LEVEL: [!] MEDIUM
   - Causes service disruption and resource exhaustion
   - No data loss or system compromise
   - Can be mitigated with rate limiting
@@ -41,7 +41,7 @@ from spade.message import Message
 
 def _log(msg: str) -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [💥 DDoS] {msg}")
+    print(f"[{ts}] [DDOS] {msg}")
 
 
 class DDoSAttacker(Agent):
@@ -92,7 +92,7 @@ class DDoSAttacker(Agent):
             self.agent.set("target_index", target_index % len(targets))
             
             self.burst_count += 1
-            _log(f"✓ Burst #{self.burst_count} complete ({burst_size} messages sent)")
+            _log(f"[+] Burst #{self.burst_count} complete ({burst_size} messages sent)")
             
             if self.burst_count < self.max_bursts:
                 _log(f"⏸️  Waiting 5 seconds before next burst...")

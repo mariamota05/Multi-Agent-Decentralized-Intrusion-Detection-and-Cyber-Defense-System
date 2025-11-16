@@ -12,12 +12,12 @@ WHAT IT DOES:
   • CPU load: phase × 8% (8% → 16% → 24%) for 5 seconds
 
 WHY THIS RESPONSE?
-  ✓ Account suspension first - reversible soft block
-  ✓ Access audit - log what was accessed/exfiltrated
-  ✓ Admin alerts - human review required
-  ✓ Permanent block only after investigation
+  [+] Account suspension first - reversible soft block
+  [+] Access audit - log what was accessed/exfiltrated
+  [+] Admin alerts - human review required
+  [+] Permanent block only after investigation
 
-RISK LEVEL: ⚠️ HIGH
+RISK LEVEL: [!] HIGH
   - Has valid credentials and knows systems
   - Trusted user makes detection difficult
   - Can access sensitive data before detection
@@ -43,7 +43,7 @@ from spade.message import Message
 
 def _log(msg: str) -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] [👤 INSIDER] {msg}")
+    print(f"[{ts}] [INSIDER] {msg}")
 
 
 class InsiderAttacker(Agent):
@@ -81,14 +81,14 @@ class InsiderAttacker(Agent):
                 # Phase 2: Unauthorized access attempts
                 if self.phase != 2:
                     self.phase = 2
-                    _log("⚠️ Phase 2: Escalating to unauthorized access attempts")
+                    _log("[!] Phase 2: Escalating to unauthorized access attempts")
                 msg_body = f"ATTACK: Attempting unauthorized access to sensitive data"
                 phase = 2
             else:
                 # Phase 3: Persistent breach attempt
                 if self.phase != 3:
                     self.phase = 3
-                    _log("🚨 Phase 3: Persistent data exfiltration attempts")
+                    _log("[!!] Phase 3: Persistent data exfiltration attempts")
                 msg_body = "ATTACK: Persistent unauthorized access attempt - trying data exfiltration"
                 phase = 3
             

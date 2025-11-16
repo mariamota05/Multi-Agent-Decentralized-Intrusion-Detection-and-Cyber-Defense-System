@@ -222,14 +222,16 @@ class IncidentResponseAgent(Agent):
                 await asyncio.sleep(0.3)  # Quick response critical
                 
                 # 1. Block attacker immediately on all nodes
+                blocked_count = 0
                 for node_jid in nodes_to_protect:
                     ctrl = Message(to=node_jid)
                     ctrl.set_metadata("protocol", "firewall-control")
                     ctrl.body = f"BLOCK_JID:{offender_jid}"
                     await self.send(ctrl)
+                    blocked_count += 1
                 
                 _log("IncidentResponse", str(self.agent.jid), 
-                     f"MITIGATION: Blocked {offender_jid} on {len(nodes_to_protect)} nodes")
+                     f"MITIGATION COMPLETE: {offender_jid} permanently blocked on {blocked_count} nodes - further attacks will be rejected")
                 
                 # 2. Send quarantine advisory (informational - nodes could isolate infected systems)
                 for node_jid in nodes_to_protect:
