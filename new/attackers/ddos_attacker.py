@@ -67,26 +67,37 @@ class DDoSAttacker(Agent):
             
             # Calculate burst size based on intensity
             burst_size = intensity * 10
-            _log(f"🌊 BURST #{self.burst_count + 1}/{self.max_bursts} - Sending {burst_size} messages...")
+            _log(f"BURST #{self.burst_count + 1}/{self.max_bursts} - Sending {burst_size} messages...")
             
             # Round-robin through targets
             target_index = self.agent.get("target_index") or 0
             
             for i in range(burst_size):
-                target = targets[target_index % len(targets)]
+                target_node_jid = targets[target_index % len(targets)]
                 target_index += 1
-                
-                msg = Message(to=target)
+
+                try:
+                    router_name = target_node_jid.split('_')[0]
+                    domain = target_node_jid.split('@')[1]
+                    target_router_jid = f"{router_name}@{domain}"
+                except Exception:
+                    _log(f"Erro: Não consegui extrair o JID do router de {target_node_jid}. A enviar diretamente.")
+                    target_router_jid = target_node_jid
+
+
+                msg = Message(to=target_router_jid)
+
+                msg.set_metadata("dst", target_node_jid)
+
                 msg.set_metadata("protocol", "attack")
                 task_data = {
-                    "cpu_load": intensity * 3.0,  # High CPU load
+                    "cpu_load": intensity * 3.0,  # Carga de CPU alta
                     "duration": 2.0
-                }
+                 }
                 msg.set_metadata("task", json.dumps(task_data))
-                msg.body = f"ATTACK: DDoS flood packet {i+1}/{burst_size} - attempting to overwhelm target"
+                msg.body = f"REQUEST:{i + 1}/{burst_size}"
+
                 await self.send(msg)
-                
-                # Small delay to not overwhelm local system
                 await asyncio.sleep(0.01)
             
             self.agent.set("target_index", target_index % len(targets))
@@ -95,7 +106,7 @@ class DDoSAttacker(Agent):
             _log(f"[+] Burst #{self.burst_count} complete ({burst_size} messages sent)")
             
             if self.burst_count < self.max_bursts:
-                _log(f"⏸️  Waiting 5 seconds before next burst...")
+                _log(f"⏸Waiting 5 seconds before next burst...")
                 await asyncio.sleep(5.0)
 
     async def setup(self):

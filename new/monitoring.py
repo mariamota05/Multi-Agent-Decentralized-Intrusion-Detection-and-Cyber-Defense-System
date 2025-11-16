@@ -98,7 +98,9 @@ class MonitoringAgent(Agent):
         """
 
         async def on_start(self):
-            _log("MonitoringAgent", str(self.agent.jid), "CNP Initiator behaviour started")
+            _log("MonitoringAgent", str(self.agent.jid), "Monitoring behaviour started")
+            # Adicionar esta linha
+            self.alerted_senders: Dict[str, float] = {}  # Mapeia sender ->_expiry_time
 
         async def run(self):
             msg = await self.receive(timeout=1)
@@ -228,41 +230,76 @@ class MonitoringAgent(Agent):
 
         async def on_start(self):
             _log("MonitoringAgent", str(self.agent.jid), "Monitoring behaviour started")
+            # Adicionar esta linha
+            self.alerted_senders: Dict[str, float] = {}  # Mapeia sender ->_expiry_time
 
         async def process_message(self, msg: Message):
             now = asyncio.get_event_loop().time()
-            sender = str(msg.sender) if msg.sender else "unknown"
-            body = (msg.body or "").lower()
-            
-            # Increment messages analyzed counter
-            self.agent.set("messages_analyzed", (self.agent.get("messages_analyzed") or 0) + 1)
+            protocol = msg.get_metadata("protocol")
 
-            # Informational log: monitoring check started
+            if protocol == "network-copy":
+                sender = msg.get_metadata("original_sender")
+                if not sender:
+                    sender = str(msg.sender)
+            else:
+                sender = str(msg.sender) if msg.sender else "unknown"
+
+            if not sender:
+                sender = "unknown"
+
+            # CORREÇÃO: "LISTA BRANCA" DE SEGURANÇA
+            if "response" in sender or "monitor" in sender:
+                _log("MonitoringAgent", str(self.agent.jid), f"Ignoring whitelisted message from {sender}")
+                return
+
+            # --- INÍCIO DA CORREÇÃO (IGNORAR ALERTAS REPETIDOS) ---
+            # Verificar se este 'sender' já está "silenciado"
+            if sender in self.alerted_senders:
+                if now < self.alerted_senders[sender]:
+                    _log("MonitoringAgent", str(self.agent.jid), f"Ignoring already-alerted sender {sender}")
+                    return  # Ignorar, a mitigação já está (supostamente) ativa
+                else:
+                    # O silenciamento expirou, remover
+                    del self.alerted_senders[sender]
+            # --- FIM DA CORREÇÃO ---
+
+            body = (msg.body or "").lower()
+
+            self.agent.set("messages_analyzed", (self.agent.get("messages_analyzed") or 0) + 1)
             now_ts = datetime.datetime.now().strftime("%H:%M:%S")
             _log("MonitoringAgent", str(self.agent.jid), f"Checking message from {sender}")
 
             suspicious = False
             reasons = []
 
-            # keyword scanning
+            dq = self.events[sender]
+            dq.append(now)
+            while dq and dq[0] < now - self.window:
+                dq.popleft()
+
+            if len(dq) >= self.threshold:
+                suspicious = True
+                reasons.append(f"rate:{len(dq)} in {self.window}s")
+
             for kw in self.keywords:
                 if kw in body:
                     suspicious = True
                     reasons.append(f"keyword:{kw}")
 
-            # simple heuristics: repeated failed login keywords
-            if "failed" in body and ("login" in body or "auth" in body):
-                # record event timestamp
-                dq = self.events[sender]
-                dq.append(now)
-                # purge old events
-                while dq and dq[0] < now - self.window:
-                    dq.popleft()
-                if len(dq) >= self.threshold:
-                    suspicious = True
-                    reasons.append(f"rate:{len(dq)} in {self.window}s")
-
             if suspicious:
+                # --- INÍCIO DA CORREÇÃO (DEFINIR O SILENCIAMENTO) ---
+                # Apenas alertar se AINDA não tivermos alertado
+                if sender not in self.alerted_senders:
+                    # Silenciar este 'sender' por 30 segundos
+                    self.alerted_senders[sender] = now + 30.0
+                    _log("MonitoringAgent", str(self.agent.jid), f"Muting sender {sender} for 30 seconds.")
+                # --- FIM DA CORREÇÃO ---
+                else:
+                    # Se ele já está silenciado, não fazemos nada
+                    _log("MonitoringAgent", str(self.agent.jid),
+                         f"Check completed for {sender}. Suspicious=True (already muted).")
+                    return  # Não iniciar um novo leilão
+
                 ts = datetime.datetime.now().isoformat()
                 alert = {
                     "time": ts,
@@ -271,22 +308,22 @@ class MonitoringAgent(Agent):
                     "reasons": reasons,
                 }
                 _log("MonitoringAgent", str(self.agent.jid), f"[ALERT] {alert}")
-                
-                # Determine threat type from reasons
+
+                # (O resto da lógica de ameaça e CNP continua igual)
                 threat_type = "unknown"
-                if any("keyword:ddos" in r or "keyword:attack" in r for r in reasons):
+                if any("rate:" in r for r in reasons):
                     threat_type = "ddos"
                 elif any("keyword:malware" in r or "keyword:virus" in r for r in reasons):
                     threat_type = "malware"
-                elif any("keyword:unauthorized" in r or "rate:" in r for r in reasons):
+                elif any("keyword:unauthorized" in r or "keyword:failed" in r for r in reasons):
                     threat_type = "insider_threat"
-                
-                # Use CNP to auction incident response if response agents available
+                elif any("keyword:ddos" in r or "keyword:attack" in r for r in reasons):
+                    threat_type = "ddos"
+
                 response_jids = self.agent.get("response_jids") or []
                 if response_jids:
                     await self.initiate_cnp(sender, threat_type, alert)
                 else:
-                    # Fallback: direct notification (legacy mode)
                     resp_jid = self.agent.get("response_jid")
                     if resp_jid:
                         m = Message(to=resp_jid)
@@ -295,7 +332,6 @@ class MonitoringAgent(Agent):
                         await self.send(m)
                         _log("MonitoringAgent", str(self.agent.jid), f"Sent alert to response agent {resp_jid}")
 
-                # auto-block offenders via firewall-control messages to nodes
                 if self.agent.get("auto_block"):
                     offender = sender
                     nodes = self.agent.get("nodes_to_notify") or []
@@ -304,11 +340,12 @@ class MonitoringAgent(Agent):
                         ctrl.set_metadata("protocol", "firewall-control")
                         ctrl.body = f"BLOCK_JID:{offender}"
                         await self.send(ctrl)
-                        _log("MonitoringAgent", str(self.agent.jid), f"Sent firewall-control BLOCK_JID for {offender} to {node}")
+                        _log("MonitoringAgent", str(self.agent.jid),
+                             f"Sent firewall-control BLOCK_JID for {offender} to {node}")
 
-            # Informational log: monitoring check completed (always log result)
             now_ts2 = datetime.datetime.now().strftime("%H:%M:%S")
-            _log("MonitoringAgent", str(self.agent.jid), f"Check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
+            _log("MonitoringAgent", str(self.agent.jid),
+                 f"Check completed for {sender}. Suspicious={suspicious}. Reasons={reasons}")
 
         async def initiate_cnp(self, offender_jid: str, threat_type: str, alert: Dict[str, Any]):
             """Start CNP auction for incident response"""

@@ -253,6 +253,7 @@ class IncidentResponseAgent(Agent):
                 await asyncio.sleep(0.5)  # Moderate response time
                 
                 # 1. Apply rate limiting first (less aggressive than full block)
+                #O agente espera 0.2 segundos e decide que, como é um ataque DDoS, "abrandar" não é suficiente.
                 for node_jid in nodes_to_protect:
                     ctrl = Message(to=node_jid)
                     ctrl.set_metadata("protocol", "firewall-control")

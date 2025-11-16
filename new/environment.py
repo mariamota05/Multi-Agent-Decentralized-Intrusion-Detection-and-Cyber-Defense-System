@@ -86,7 +86,8 @@ NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
 # No attackers (test routing only):
 # ATTACKERS = []
 #
-ATTACKERS = [("stealth_malware", ["router0_node0@localhost"], 5, 20, 3)]
+ATTACKERS = [("ddos", ["router1_node0@localhost"], 8, 15, 3),
+]
 
 # ============================================================================
 # MESSAGE TESTING (optional - for testing routing)
@@ -106,7 +107,7 @@ ATTACKERS = [("stealth_malware", ["router0_node0@localhost"], 5, 20, 3)]
 #     (1, 1, 2, 0, "REQUEST: status", 5),         # Request processing after 5 seconds
 #     (0, 1, 2, 1, "Hello from router0", 8),      # Custom message after 8 seconds
 # ]
-SCHEDULED_MESSAGES = []  # Leave empty for no test messages
+SCHEDULED_MESSAGES = []
 
 # ============================================================================
 # RESOURCES (usually don't need to change)
@@ -300,8 +301,15 @@ async def run_environment(domain: str, password: str, run_seconds: int = 15):
     
     # Configure response agents with nodes they can protect
     all_node_jids = [node_jid for _, _, node_jid, _ in nodes]
+    # Adicionar esta linha para obter os JIDs dos routers
+    all_router_jids = [router_jid for _, router_jid, _ in routers]
+
+    # Combinar as duas listas
+    all_jids_to_protect = all_node_jids + all_router_jids
+
     for resp_idx, response_jid, response in response_agents:
-        response.set("nodes_to_protect", all_node_jids)
+        # Usar a lista combinada
+        response.set("nodes_to_protect", all_jids_to_protect)
     
     # Create attacker agents from ATTACKERS list
     for att_idx, (att_type, targets, intensity, duration, delay) in enumerate(ATTACKERS):
