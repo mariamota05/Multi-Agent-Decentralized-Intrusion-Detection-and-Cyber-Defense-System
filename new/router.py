@@ -182,8 +182,22 @@ class RouterAgent(Agent):
 
             _log("Router", str(self.agent.jid), f"received msg from {msg.sender}")
 
-            # Check if this is a threat alert from a node firewall
+            # Check protocol for special messages
             protocol = msg.get_metadata("protocol")
+            
+            # Handle node death notifications
+            if protocol == "node-death":
+                dead_node = str(msg.sender)
+                _log("Router", str(self.agent.jid), f"Node {dead_node} reported death: {msg.body}")
+                # Remove from local_nodes to stop routing to it
+                local = self.agent.get("local_nodes") or set()
+                if dead_node in local:
+                    local.discard(dead_node)
+                    self.agent.set("local_nodes", local)
+                    _log("Router", str(self.agent.jid), f"Removed {dead_node} from routing table - no longer forwarding")
+                return
+            
+            # Check if this is a threat alert from a node firewall
             if protocol == "threat-alert":
                 _log("Router", str(self.agent.jid), f"Threat alert received: {msg.body}")
                 # Forward to monitors

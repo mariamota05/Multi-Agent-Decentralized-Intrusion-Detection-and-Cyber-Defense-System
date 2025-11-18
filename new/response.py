@@ -239,6 +239,7 @@ class IncidentResponseAgent(Agent):
                 for node_jid in nodes_to_protect:
                     cure = Message(to=node_jid)
                     cure.set_metadata("protocol", "malware-cure")
+                    cure.set_metadata("dst", node_jid)  # Set destination for router forwarding
                     cure.body = "CURE_INFECTION"
                     await self.send(cure)
                     cured_count += 1

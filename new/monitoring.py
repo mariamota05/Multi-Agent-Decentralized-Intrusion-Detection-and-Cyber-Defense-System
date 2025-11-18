@@ -352,7 +352,7 @@ class MonitoringAgent(Agent):
 
                 # --- LÓGICA DE CLASSIFICAÇÃO DE AMEAÇA MELHORADA ---
                 threat_type = "unknown"
-                protocol = copy_metadata.get("protocol") if copy_metadata else None
+                protocol = msg.get_metadata("protocol")
                 
                 # Check for malware infection protocol
                 if protocol == "malware-infection":
