@@ -90,7 +90,8 @@ NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
              ("ddos", ["router2_node1@localhost"], 7, 30, 5),
              ("stealth_malware", ["router0_node0@localhost", "router3_node1@localhost"], 4, 50, 2)]'''
 
-ATTACKERS = [("stealth_malware", ["router2_node1@localhost"], 5, 30, 3)]
+ATTACKERS = [("stealth_malware", ["router2_node1@localhost"], 5, 30, 3),
+             ("ddos", ["router2_node1@localhost"], 7, 30, 5)]
 
 # ============================================================================
 # MESSAGE TESTING (optional - for testing routing)
@@ -112,15 +113,16 @@ ATTACKERS = [("stealth_malware", ["router2_node1@localhost"], 5, 30, 3)]
 # ]
 # Send burst of traffic to infected node to trigger CPU spike (all at same time)
 # This simulates normal workload that would trigger self-detection when infected
+#   (0, 0, 2, 1, "REQUEST: process_data", 10),
+#   (1, 0, 2, 1, "REQUEST: analyze_logs", 10),
+#   (3, 0, 2, 1, "REQUEST: sync_database", 10),
+#   (4, 0, 2, 1, "REQUEST: backup_files", 10),
+#   (0, 1, 2, 1, "REQUEST: compile_report", 10),
+#   (1, 1, 2, 1, "REQUEST: verify_checksum", 10),
+#   (3, 1, 2, 1, "REQUEST: index_documents", 10),
+#   (4, 1, 2, 1, "REQUEST: optimize_cache", 10),
 SCHEDULED_MESSAGES = [
-    (0, 0, 2, 1, "REQUEST: process_data", 10),
-    (1, 0, 2, 1, "REQUEST: analyze_logs", 10),
-    (3, 0, 2, 1, "REQUEST: sync_database", 10),
-    (4, 0, 2, 1, "REQUEST: backup_files", 10),
-    (0, 1, 2, 1, "REQUEST: compile_report", 10),
-    (1, 1, 2, 1, "REQUEST: verify_checksum", 10),
-    (3, 1, 2, 1, "REQUEST: index_documents", 10),
-    (4, 1, 2, 1, "REQUEST: optimize_cache", 10),
+ 
 ]
 
 # ============================================================================
@@ -385,6 +387,32 @@ async def run_environment(domain: str, password: str, run_seconds: int = 200):
     # Run for specified duration
     _log("environment", f"Network running for {run_seconds} seconds...")
     await asyncio.sleep(run_seconds)
+    
+    # Check for alive nodes before shutdown
+    _log("environment", "=" * 80)
+    _log("environment", "FINAL NODE STATUS CHECK")
+    _log("environment", "=" * 80)
+    
+    alive_nodes = []
+    dead_nodes = []
+    
+    for r_idx, n_idx, node_jid, node in nodes:
+        is_dead = node.get("node_dead") or False
+        if is_dead:
+            dead_nodes.append(f"router{r_idx}_node{n_idx}")
+            _log("environment", f"[X] router{r_idx}_node{n_idx} - DEAD (crashed from CPU overload)")
+        else:
+            alive_nodes.append(f"router{r_idx}_node{n_idx}")
+            cpu = node.get("cpu_usage") or 0.0
+            is_infected = node.get("malware_infection") or False
+            status = "INFECTED" if is_infected else "HEALTHY"
+            _log("environment", f"[OK] router{r_idx}_node{n_idx} - ALIVE ({status}, CPU={cpu:.1f}%)")
+    
+    _log("environment", "=" * 80)
+    _log("environment", f"SUMMARY: {len(alive_nodes)}/{len(nodes)} nodes alive, {len(dead_nodes)} crashed")
+    if dead_nodes:
+        _log("environment", f"Crashed nodes: {', '.join(dead_nodes)}")
+    _log("environment", "=" * 80)
     
     # Stop all agents
     _log("environment", "Stopping all agents...")

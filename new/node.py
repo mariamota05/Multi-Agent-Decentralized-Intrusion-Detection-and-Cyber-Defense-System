@@ -63,6 +63,12 @@ class NodeAgent(Agent):
         async def run(self):
             msg = await self.receive(timeout=10)
             if msg:
+                # Check if node is dead (crashed from 100% CPU)
+                is_dead = self.agent.get("node_dead") or False
+                if is_dead:
+                    # Dead nodes don't process any messages
+                    return
+                
                 # Check firewall (if present) for inbound messages
                 fw = None
                 try:
@@ -94,8 +100,8 @@ class NodeAgent(Agent):
                 tid = f"recv-{counter}"
                 self.agent.set("task_counter", counter)
                 
-                # Base message processing: 2% CPU for 0.5 seconds
-                base_load = 2.0
+                # Base message processing: 1.5% CPU for 0.5 seconds (lightweight)
+                base_load = 1.5
                 
                 # MALWARE INFECTION: Apply persistent overhead if infected
                 is_infected = self.agent.get("malware_infection") or False
@@ -241,6 +247,14 @@ class NodeAgent(Agent):
                              f"INFECT message received but protocol={protocol} (expected 'malware-infection')")
                 elif body.startswith("CURE_INFECTION"):
                     # MALWARE REMOVAL: Hard reset - clear all state and reinitialize
+                    # BUT: Dead nodes cannot be revived, only infected nodes can be cured
+                    is_dead = self.agent.get("node_dead") or False
+                    if is_dead:
+                        # Crashed nodes are permanently offline and cannot be revived
+                        _log("NodeAgent", str(self.agent.jid), 
+                             "CURE_INFECTION received but node is DEAD - Cannot revive crashed nodes")
+                        return
+                    
                     was_infected = self.agent.get("malware_infection") or False
                     if was_infected:
                         malware_type = self.agent.get("malware_type") or "unknown"
@@ -287,9 +301,9 @@ class NodeAgent(Agent):
                     counter += 1
                     tid = f"proc-{counter}"
                     self.agent.set("task_counter", counter)
-                    # Request processing: 15% CPU for 2 seconds (heavy processing task)
-                    # Normal node: 15% per task, Infected node: 35% per task (+20% malware overhead)
-                    active[tid] = {"end": _now_ts() + 2.0, "load": 15.0}
+                    # Request processing: 10% CPU for 1.5 seconds (moderate processing task)
+                    # Normal node: 10% per task, Infected node: 30% per task (+20% malware overhead)
+                    active[tid] = {"end": _now_ts() + 1.5, "load": 10.0}
                     self.agent.set("active_tasks", active)
                     
                     # Send reply through router instead of directly
@@ -405,6 +419,29 @@ class NodeAgent(Agent):
             self.agent.set("cpu_usage", cpu_usage)
             self.agent.set("bandwidth_usage", bw_usage)
 
+            # Check for node death at 100% CPU
+            if cpu_usage >= 100.0:
+                is_dead = self.agent.get("node_dead") or False
+                if not is_dead:
+                    _log("NodeAgent", str(self.agent.jid), 
+                         f"NODE CRASHED: CPU={cpu_usage:.1f}% - System overload, node permanently offline")
+                    self.agent.set("node_dead", True)
+                    # Clear all tasks and stop processing
+                    self.agent.set("active_tasks", {})
+                    self.agent.set("cpu_usage", 0.0)
+                    self.agent.set("bandwidth_usage", 0.0)
+                    
+                    # Notify router that this node is dead
+                    router = self.agent.get("router")
+                    if router:
+                        from spade.message import Message
+                        death_msg = Message(to=router)
+                        death_msg.set_metadata("protocol", "node-death")
+                        death_msg.body = f"NODE_DEATH: {str(self.agent.jid)} crashed - CPU overload"
+                        await self.send(death_msg)
+                    
+                    return  # Stop processing
+
             # Trigger sanity check if CPU hits critical threshold
             if cpu_usage > 70.0:
                 await self.check_for_infection(cpu_usage, active)
@@ -508,14 +545,14 @@ class NodeAgent(Agent):
             
             # Calculate average CPU load per task
             avg_cpu_per_task = cpu_usage / num_tasks
-            CPU_PER_TASK_THRESHOLD = 16.0  # Normal: 10-15%, Infected: 20-35%
+            CPU_PER_TASK_THRESHOLD = 14.0  # Normal: 8-12%, Infected: 18-32% (updated for lighter loads)
             
             if avg_cpu_per_task > CPU_PER_TASK_THRESHOLD:
                 # Abnormally high CPU per task - likely malware
                 _log("NodeAgent", str(self.agent.jid), 
                      f"INFECTION DETECTED: CPU={cpu_usage:.1f}% tasks={num_tasks} avg/task={avg_cpu_per_task:.1f}%")
                 _log("NodeAgent", str(self.agent.jid), 
-                     f"Normal avg is 10-15%, detected {avg_cpu_per_task:.1f}% - ALERTING ROUTER")
+                     f"Normal avg is 8-12%, detected {avg_cpu_per_task:.1f}% - ALERTING ROUTER")
                 await self.send_infection_alert()
             else:
                 # High CPU but normal per-task load - just overloaded
