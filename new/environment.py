@@ -1,28 +1,31 @@
 """Scalable network environment for multi-router/multi-node simulation.
 
-This module creates a configurable network topology with multiple routers
-connected to each other and multiple nodes attached to each router. The topology
-supports inter-router routing.
+This module orchestrates the creation of the network topology, initializes all
+SPADE agents (Routers, Nodes, Monitors, Response Agents, and Attackers), and
+manages the simulation lifecycle.
 
 Configuration:
-  Edit the variables below to change network topology, attacks, and messages.
+    The simulation parameters (topology, number of nodes, attack scenarios) are
+    configured via global constants defined in the 'EASY CONFIGURATION' section
+    below.
 
-Usage:
-  python new/environment.py --domain localhost --password secret --time 30
+Example:
+    Run the simulation with default settings:
+    python new/environment.py
 """
 
 import argparse
 import asyncio
-import os
 import csv
-import argparse
-import sys
-import json
 import datetime
+import os
 from typing import List, Dict, Tuple, Optional
 
 import spade
+from spade.message import Message
+from spade.behaviour import OneShotBehaviour
 
+# Import local agents
 from node import NodeAgent
 from router import RouterAgent
 from monitoring import MonitoringAgent
@@ -33,81 +36,76 @@ from attackers.malware_attacker import MalwareAttacker
 from attackers.ddos_attacker import DDoSAttacker
 from attackers.insider_attacker import InsiderAttacker
 
-REAL_ATTACK_START_TIME = None
+
+# Global variable to track exact attack start time for metrics
+REAL_ATTACK_START_TIME: Optional[datetime.datetime] = None
+
 
 def _log(hint: str, msg: str) -> None:
-    """Uniform log helper for environment script."""
+    """Log helper for environment script with timestamp.
+
+    Args:
+        hint (str): The source/category of the log (e.g., 'environment').
+        msg (str): The message to display.
+    """
     ts = datetime.datetime.now().strftime("%H:%M:%S")
-    log_msg = f"[{ts}] [{hint}] {msg}"
-    print(log_msg)
+    print(f"[{ts}] [{hint}] {msg}")
 
 
-# ============================================================================
-# EASY CONFIGURATION - Edit these variables before running
-# ============================================================================
 
-# Network topology
-NUM_ROUTERS = 5  # Number of routers in the network
-NODES_PER_ROUTER = 2  # Number of nodes attached to each router
+# Configuration Section
+# Network Topology
+NUM_ROUTERS = 5           # Total number of routers in the network
+NODES_PER_ROUTER = 2      # Number of nodes attached to each router
 ROUTER_TOPOLOGY = "ring"  # Options: "ring", "mesh", "star", "line"
 
-# Security agents
-NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
+# Security Agents
+NUM_RESPONSE_AGENTS = 1   # Number of incident response agents (CNP managers)
 
-# ============================================================================
-# ATTACKER CONFIGURATION
-# ============================================================================
 
-# Configuração para TESTE DE DDOS (Métricas)
-# Um ataque forte (intensidade 9) contra o router1_node0 começando ao segundo 5
+# Attacker configuration
+# Format: (Type, Targets, Intensity, Duration, Start_Delay)
 ATTACKERS = [
-    ("ddos", ["router1_node0@localhost"], 9, 30, 5)
+    ("stealth_malware", ["router1_node0@localhost"], 9, 30, 5),
+    ("ddos", ["router1_node0@localhost"], 8, 30, 5)
 ]
 
-# Outros exemplos (comentados):
+# Other examples (commented out):
 # ATTACKERS = [("insider_threat", ["router1_node0@localhost"], 6, 40, 3)]
 # ATTACKERS = [("stealth_malware", ["router0_node0@localhost"], 4, 50, 2)]
 
-# ============================================================================
-# MESSAGE TESTING (optional - for testing routing)
-# ============================================================================
-
-# Configuração para MEDIR SERVIÇO LEGÍTIMO durante o DDoS
-# Envia PINGs antes, durante e depois do ataque para ver se falham
+# Message scheduling configuration
+# Format: (Source_Router_ID, Source_Node_ID, Dest_Router_ID, Dest_Node_ID, Body, Delay)
 SCHEDULED_MESSAGES = [
-    # 1. Teste Base (Antes do ataque) - Cliente: Router0_Node0
+    # Before attack starts
     (0, 0, 1, 0, "PING", 2),
-
-    # --- O ATAQUE COMEÇA AOS 5s ---
-
-    # 2. Início do Ataque - Cliente Diferente: Router0_Node1
-    # Se falhar, é porque o router1 está a começar a ficar congestionado
+    # --- ATTACK STARTS AT 5s ---
     (0, 1, 1, 0, "PING", 7),
-
-    # 3. Meio do Ataque - Cliente Diferente: Router2_Node0
-    # Este é o teste crítico. O nó está sob stress máximo.
+    # Critical test: Node is under max stress.
     (2, 0, 1, 0, "PING", 10),
-
-    # 4. Pico do Ataque - Cliente Diferente: Router3_Node0
+    # Peak Attack
     (3, 0, 1, 0, "PING", 15),
-
-    # 5. Fim/Recuperação - Cliente Diferente: Router4_Node0
-    # Testa se o nó sobreviveu e voltou a responder
+    # Tests if the node survived and recovered service.
     (4, 0, 1, 0, "PING", 25),
 ]
 
-# ============================================================================
-# RESOURCES
-# ============================================================================
+# Deterministic Resource Generation
+USE_DETERMINISTIC_RESOURCES = True  # If True, removes randomness from node CPU generation
+RESOURCE_SEED_BASE = 1000           # Base seed for deterministic node behavior
 
-USE_DETERMINISTIC_RESOURCES = True  # No randomness
-RESOURCE_SEED_BASE = 1000  # Base seed for nodes
-
-# ============================================================================
 
 
 def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int]]:
-    """Build router-to-router connectivity graph."""
+    """Build router-to-router connectivity graph.
+    Generates adjacency lists based on the selected topology type.
+
+    Args:
+        num_routers (int): Total number of routers.
+        topology (str): Type of topology ("ring", "mesh", "star", "line").
+
+    Returns:
+        Dict[int, List[int]]: Dictionary mapping router index to list of neighbor indices.
+    """
     connections = {i: [] for i in range(num_routers)}
 
     if topology == "ring":
@@ -120,7 +118,7 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
                 if i != j:
                     connections[i].append(j)
     elif topology == "star":
-        # Router 0 is the hub
+        # Router 0 is the central hub
         for i in range(1, num_routers):
             connections[0].append(i)
             connections[i].append(0)
@@ -131,7 +129,7 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
     else:
         raise ValueError(f"Unknown topology: {topology}")
 
-    # Remove duplicates and sort
+    # Remove duplicates and sort for consistency
     for i in connections:
         connections[i] = sorted(list(set(connections[i])))
 
@@ -139,7 +137,26 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
 
 
 async def run_environment(domain: str, password: str, run_seconds: int = 40, base_cpu: float = 10.0):
-    """Create and run the full network environment."""
+    """Create, configure, and run the full network simulation.
+
+    This is the main entry point for the simulation logic.
+    Flow:
+    1. Builds the router topology graph.
+    2. Instantiates Monitoring and Incident Response agents.
+    3. Instantiates Routers and Nodes.
+    4. Configures routing tables (using BFS for static path calculation) and neighbors.
+    5. Configures Attacker agents.
+    6. Starts all agents and scheduled tasks.
+    7. Waits for simulation duration.
+    8. Collects and prints metrics/reports.
+    9. Stops all agents.
+
+    Args:
+        domain (str): XMPP domain (e.g., "localhost").
+        password (str): XMPP password for all agents.
+        run_seconds (int): Duration of the simulation in seconds.
+        base_cpu (float): Initial CPU load percentage for nodes.
+    """
     _log("environment", f"Building network: {NUM_ROUTERS} routers, {NODES_PER_ROUTER} nodes/router, topology={ROUTER_TOPOLOGY}")
 
     # Build router connectivity
@@ -199,7 +216,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
                 router.add_local_node(node_jid)
                 local_node_count += 1
 
-        # BFS Routing setup
+        # BFS Routing setup (Static Route Calculation)
         direct_neighbors = router_connections[r_idx]
         from collections import deque
         routes_to_add = {}
@@ -225,10 +242,12 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
                         visited.add(neighbor_idx)
                         queue.append((neighbor_idx, path + [neighbor_idx]))
 
+        # Apply routes using wildcards for prefixes
         for dest_idx, next_hop_jid in routes_to_add.items():
             prefix = f"router{dest_idx}_*"
             router.add_route(prefix, next_hop_jid)
 
+        # Set initial neighbor metrics for intelligent routing
         for neighbor_idx in direct_neighbors:
             neighbor_router_jid = f"router{neighbor_idx}@{domain}"
             router_neighbors[neighbor_router_jid] = {
@@ -238,6 +257,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
 
         router.set("router_neighbors", router_neighbors)
 
+        # Attach local monitor
         local_monitor_jid = f"monitor{r_idx}@{domain}"
         router.set("monitor_jids", [local_monitor_jid])
         router.set("internal_monitor_jids", [local_monitor_jid])
@@ -256,7 +276,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
 
     for resp_idx, response_jid, response in response_agents:
         response.set("nodes_to_protect", all_jids_to_protect)
-        # Dar a lista de monitores ao response agent para Threat Intel Sharing
+        # Give monitor list to response agent for Threat Intel Sharing
         response.set("monitor_jids", [m[1] for m in monitors])
 
     # Create attacker agents
@@ -270,6 +290,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
         elif att_type == "insider_threat":
             attacker = InsiderAttacker(attacker_jid, password)
         else:
+            # Default fallback
             attacker = MalwareAttacker(attacker_jid, password)
 
         attacker.set("targets", targets)
@@ -303,10 +324,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
     # Run simulation
     await asyncio.sleep(run_seconds)
 
-    # ========================================================================
-    # FINAL REPORT & METRICS
-    # ========================================================================
-
+    # Final status report
     _log("environment", "=" * 80)
     _log("environment", "FINAL NODE STATUS CHECK")
     _log("environment", "=" * 80)
@@ -322,78 +340,64 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
         else:
             alive_nodes.append(node_jid)
             cpu = node.get("cpu_usage") or 0.0
-            is_infected = node.get("is_infected") or False # Corrigido para is_infected
+            is_infected = node.get("is_infected") or False
             status = "INFECTED" if is_infected else "HEALTHY"
             _log("environment", f"[OK] {node_jid} - ALIVE ({status}, CPU={cpu:.1f}%)")
 
     _log("environment", "-" * 80)
 
-    # --- RELATÓRIO DE ANÁLISE DDOS E SERVIÇO ---
-    _log("environment", "RELATÓRIO DE MÉTRICAS E SEGURANÇA")
+    # Metrics and Reporting
+    _log("environment", "DETAILED NODE METRICS REPORT")
     _log("environment", "-" * 80)
 
     total_leakage = 0
     total_overload = 0
 
     for r_idx, n_idx, node_jid, node in nodes:
-        # Extrair métricas internas do agente
+        # Extract internal agent metrics
         leakage = node.get("ddos_packets_received") or 0
         overload_ticks = node.get("cpu_overload_ticks") or 0
         pings = node.get("pings_answered") or 0
         is_infected = node.get("is_infected")
 
-        # Mostrar apenas se houver algo relevante
+        # Only show if there is relevant data
         if leakage > 0 or overload_ticks > 0 or pings > 0 or is_infected:
             total_leakage += leakage
             total_overload += overload_ticks
 
             print(f"\n  NÓ: {node_jid}")
             if is_infected:
-                print(f"  [!] STATUS: INFECTADO (Malware/Worm Presente)")
+                print(f"  [!] STATUS: INFECTED por malware!")
 
             if leakage > 0:
-                print(f"  -> Ataques Recebidos (Leakage): {leakage} msgs")
+                print(f"  -> Received Malicious Packets not blocked: {leakage}")
                 if leakage < 10:
-                    print("     (Avaliação: Defesa Eficaz - Bloqueio rápido)")
+                    print("     (Evaluation: Quick Defense - Most attacks blocked)")
                 else:
-                    print("     (Avaliação: Defesa Lenta - Muitos pacotes passaram)")
-
+                    print("     (Evaluation: Slow Defense - Many attacks got through)")
             if overload_ticks > 0:
-                print(f"  -> Tempo em Sobrecarga (>90% CPU): {overload_ticks} ciclos")
+                print(f"  -> Times CPU reached critical overload: {overload_ticks}")
             else:
-                print(f"  -> Estabilidade: 100% (Nunca atingiu saturação crítica)")
+                print(f"  -> CPU remained stable throughout the simulation.")
 
             if pings > 0:
-                print(f"  -> Serviços Legítimos (Pings) processados com sucesso: {pings}")
+                print(f"  -> Service Availability: Responded to {pings} test pings.")
 
     last_mitigation = None
     if response_agents:
-        # O objeto do agente é o terceiro elemento do tuplo (idx, jid, agent)
+        # Agent object is the 3rd element of tuple (idx, jid, agent)
         resp_agent = response_agents[0][2]
         if hasattr(resp_agent, "mitigation_history") and resp_agent.mitigation_history:
-            last_mitigation = resp_agent.mitigation_history[0]  # Pega no primeiro evento
-        # Encontrar a vítima principal (router1_node0) para extrair métricas de pico
-        victim_peak_cpu = 0.0
-        victim_died = False
+            last_mitigation = resp_agent.mitigation_history[0]  # Get first event
 
-        # Procurar o nó específico nos targets do atacante ou assumir router1_node0
-        target_jid = "router1_node0@localhost"  # Default do seu cenário
-        if ATTACKERS:
-            target_jid = ATTACKERS[0][1][0]  # Pega no primeiro alvo do primeiro atacante
-
-        for _, _, node_jid, node in nodes:
-            if node_jid == target_jid:
-                victim_peak_cpu = node.get("cpu_peak") or 0.0
-                victim_died = node.get("node_dead") or False
-                break
-    # Encontrar a vítima principal (router1_node0) para extrair métricas de pico
+    # Find primary victim (router1_node0) to extract peak metrics
     victim_peak_cpu = 0.0
     victim_died = False
 
-    # Procurar o nó específico nos targets do atacante ou assumir router1_node0
-    target_jid = "router1_node0@localhost"  # Default do seu cenário
+    # Default target or attacker's first target
+    target_jid = "router1_node0@localhost"
     if ATTACKERS:
-        target_jid = ATTACKERS[0][1][0]  # Pega no primeiro alvo do primeiro atacante
+        target_jid = ATTACKERS[0][1][0]
 
     for _, _, node_jid, node in nodes:
         if node_jid == target_jid:
@@ -425,7 +429,8 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
         _log("environment", f"Mitigação Real Efetiva: {last_mitigation.strftime('%H:%M:%S')}")
     _log("environment", "=" * 80)
 
-    save_metrics_to_csv("simulation_metrics_cpu.csv", ATTACKERS, stats, base_cpu)
+    # Uncomment to save CSV metrics
+    # save_metrics_to_csv("simulation_metrics.csv", ATTACKERS, stats, base_cpu)
 
     # Stop all agents
     _log("environment", "Stopping all agents...")
@@ -445,17 +450,22 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
 
 
 async def start_attackers_delayed(attackers: List[Tuple[int, str, object, int]]):
-    """Start attackers with individual delays."""
+    """Start attacker agents with individual start delays.
+
+    Also records the global `REAL_ATTACK_START_TIME` when the first attacker launches.
+
+    Args:
+        attackers (List[Tuple]): List of (index, jid, agent_instance, delay_seconds).
+    """
     global REAL_ATTACK_START_TIME
     for att_idx, attacker_jid, attacker, delay in attackers:
         if delay > 0:
             _log("environment", f"Waiting {delay}s before starting attacker {att_idx}...")
             await asyncio.sleep(delay)
 
-        # Marcar o início real do ataque ---
+        # Mark real attack start time
         if REAL_ATTACK_START_TIME is None:
             REAL_ATTACK_START_TIME = datetime.datetime.now()
-        # --------------------------------------------
 
         await attacker.start(auto_register=True)
         att_type = type(attacker).__name__.replace("Attacker", "")
@@ -467,10 +477,15 @@ async def send_scheduled_messages(
     messages: List[Tuple[int, int, int, int, str, int]],
     domain: str
 ):
-    """Send scheduled test messages."""
-    from spade.message import Message
-    from spade.behaviour import OneShotBehaviour
+    """Send a sequence of test messages defined in configuration.
 
+    Used to validate service availability during attacks.
+
+    Args:
+        nodes (List): List of existing node tuples.
+        messages (List): List of message definitions (src_r, src_n, dst_r, dst_n, body, delay).
+        domain (str): XMPP domain.
+    """
     async def send_single_message(from_r, from_n, to_r, to_n, msg_body, delay):
         await asyncio.sleep(delay)
 
@@ -489,6 +504,7 @@ async def send_scheduled_messages(
         destination = f"router{to_r}_node{to_n}@{domain}"
 
         class SendMessageBehaviour(OneShotBehaviour):
+            """One-shot behaviour to send a single scheduled message."""
             async def run(self):
                 msg = Message(to=sender_router)
                 msg.set_metadata("dst", destination)
@@ -505,29 +521,36 @@ async def send_scheduled_messages(
     await asyncio.gather(*tasks)
 
 
-def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
-    """
-    Guarda as métricas de desempenho da simulação num ficheiro CSV.
-    Mapeia diretamente os resultados para os 5 pontos exigidos no enunciado.
+def save_metrics_to_csv(filename: str, attack_config: List, network_stats: Dict, base_cpu: float):
+    """Save simulation performance metrics to a CSV file.
+
+    Maps the raw internal stats to the specific metrics required by the
+    assignment (Detection Rate, Response Time, Resilience, etc.).
+
+    Args:
+        filename (str): Path to output CSV file.
+        attack_config (List): Configuration of the attack used in this run.
+        network_stats (Dict): Dictionary containing collected statistics (leakage, overload, etc.).
+        base_cpu (float): The base CPU load configured for this run.
     """
     file_exists = os.path.isfile(filename)
 
-    # Cabeçalhos mapeados exatamente para os requisitos do trabalho
+    # Headers mapped to assignment requirements
     headers = [
         'Timestamp',
         'Scenario_Attack',
         'Scenario_Intensity',
-        'Metric1_Detection_Rate',  # True Positives
-        'Metric2a_False_Positives',  # Falsos Alarmes
-        'Metric2b_False_Negatives',  # Leakage (pacotes que passaram)
-        'Metric3_Response_Time',  # Tempo real (s)
+        'Metric1_Detection_Rate',      # True Positives
+        'Metric2a_False_Positives',    # False Alarms
+        'Metric2b_False_Negatives',    # Leakage (packets that got through)
+        'Metric3_Response_Time',       # Real time (s)
         'Metric4_Network_Resilience',  # % Uptime
-        'Metric4_Service_Availability',  # % Pings respondidos
-        'Metric5_Collab_Efficiency',  # Eficiência geral
-        'Metric6_Victim_Peak_CPU',  # O valor máximo de stress
-        'Metric7_Victim_Crashed',  # Booleano explícito (TRUE/FALSE)
-        'Raw_Overload_Cycles',  # Dados brutos de CPU
-        'Raw_Leakage_Count',  # Dados brutos de msgs
+        'Metric4_Service_Availability',# % Pings answered
+        'Metric5_Collab_Efficiency',   # Qualitative assessment
+        'Metric6_Victim_Peak_CPU',     # Max stress value
+        'Metric7_Victim_Crashed',      # Boolean (YES/NO)
+        'Raw_Overload_Cycles',         # Raw CPU data
+        'Raw_Leakage_Count',           # Raw msg count
         'Scenario_Base_CPU'
     ]
 
@@ -536,8 +559,7 @@ def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
         if not file_exists:
             writer.writeheader()
 
-        # 1. Dados do Cenário
-        # (Extrai o tipo e intensidade do primeiro atacante configurado)
+        # Scenario Data
         if attack_config and len(attack_config) > 0:
             att_type = attack_config[0][0]
             intensity = attack_config[0][2]
@@ -545,45 +567,40 @@ def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
             att_type = "None"
             intensity = 0
 
-        # 2. Dados Estatísticos Brutos
+        # Raw Statistics
         leakage = network_stats.get('total_leakage', 0)
         overload = network_stats.get('total_overload', 0)
         pings = network_stats.get('total_pings', 0)
         alive = network_stats.get('nodes_alive', 0)
-        total_nodes = network_stats.get('total_nodes', 1)  # Evitar divisão por zero
+        total_nodes = network_stats.get('total_nodes', 1)
 
-        # 3. CÁLCULO DAS MÉTRICAS (Lógica de Negócio)
+        # METRIC CALCULATION (Business Logic)
 
-        # Metric 1: Detection Rate (True Positives)
-        # Se houve mitigação (o nó não foi 100% destruído instantaneamente e leakage < 100), detetou.
-        # Se leakage for massivo (>100), a deteção falhou ou foi ineficaz.
+        # Detection Rate (True Positives)
+        # If mitigation occurred (leakage < 100), detection was successful.
         det_rate = "100%" if leakage < 100 else "0%"
 
-        # Metric 2a: False Positives
-        # O sistema atual tem regras conservadoras, assumimos 0 para esta simulação
+        # False Positives (Conservative assumption)
         fp_rate = "0%"
 
-        # Metric 2b: False Negatives (Leakage)
-        # Representa a percentagem de ataques que o sistema "deixou passar" por achar seguros
-        # Estimativa: (Leakage / Total estimado de msgs do ataque) * 100
-        # Num ataque de intensidade 7 (210 msgs), 6 fugas = 2.8%
+        # False Negatives (Leakage Rate)
+        # Estimate % of attack messages that bypassed defense.
+        # Formula: (Leakage / Estimated Total Attack Msgs) * 100
         estimated_attack_msgs = max(1, intensity * 10 * 3 if att_type == 'ddos' else 10)
         fn_rate_val = (leakage / estimated_attack_msgs) * 100
         fn_rate = f"{leakage} msgs ({fn_rate_val:.1f}%)"
 
-        # Metric 3: Response Time (Cálculo Real via Timestamps)
+        # Response Time (Calculated via Timestamps)
         resp_time_str = "N/A"
         mitigation_ts = network_stats.get('mitigation_time')
         attack_ts = network_stats.get('attack_start')
 
         if mitigation_ts and attack_ts:
-            # Calcula a diferença exata entre o início do ataque e a mitigação
             delta = (mitigation_ts - attack_ts).total_seconds()
-            # Ajuste para latência interna: se for muito rápido, assume min 0.001s
             if delta < 0: delta = 0.001
             resp_time_str = f"{delta:.3f}s"
         else:
-            # Fallback: Se não houver timestamps, estima pelo leakage
+            # Fallback estimation based on leakage
             if leakage < 5:
                 resp_time_str = "< 0.5s (Est)"
             elif leakage < 15:
@@ -591,12 +608,11 @@ def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
             else:
                 resp_time_str = "> 3.0s (Slow)"
 
-        # Metric 4: Network Resilience (Uptime)
+        # Network Resilience (Uptime)
         uptime_val = (alive / total_nodes) * 100
         uptime = f"{uptime_val:.1f}%"
 
-        # Metric 5: Efficiency of Decentralized Collaboration
-        # Avaliação qualitativa baseada no resultado final
+        # Efficiency of Decentralized Collaboration
         if alive == total_nodes and overload < 5:
             efficiency = "High (Optimal Protection)"
         elif alive == total_nodes:
@@ -604,11 +620,10 @@ def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
         else:
             efficiency = "Low (System Crash)"
 
-        # Dados Novos
+        # Extra metrics
         victim_peak = network_stats.get('victim_peak_cpu', 0.0)
         victim_died = network_stats.get('victim_died', False)
 
-        # 4. Escrever a linha
         row = {
             'Timestamp': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             'Scenario_Attack': att_type,
@@ -627,13 +642,15 @@ def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
             'Scenario_Base_CPU': base_cpu
         }
         writer.writerow(row)
-        print(f"\n[METRICS] Dados guardados em {filename}")
+        print(f"\n[METRICS] Data saved to {filename}")
+
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--domain", default="localhost", help="XMPP domain")
-    parser.add_argument("--password", required=False, help="Password")
-    parser.add_argument("--time", type=int, default=40, help="Seconds to run")
+    """Parse arguments and run the main event loop."""
+    parser = argparse.ArgumentParser(description="Run the multi-agent network simulation.")
+    parser.add_argument("--domain", default="localhost", help="XMPP domain (default: localhost)")
+    parser.add_argument("--password", required=False, help="XMPP password for agents")
+    parser.add_argument("--time", type=int, default=40, help="Simulation duration in seconds")
     parser.add_argument("--base-cpu", type=float, default=10.0,
                         help="Initial CPU load for nodes")
     args = parser.parse_args()

@@ -1,40 +1,13 @@
-"""
-Firewall behaviour for SPADE agents.
+"""Firewall behaviours for network traffic filtering and control.
 
-Usage:
-  from new.firewall import FirewallBehaviour
-  fw = FirewallBehaviour()
-  self.add_behaviour(fw)
-  # optionally store reference
-  self.set("firewall", fw)
-
-The behaviour listens for control messages with protocol 'firewall-control' to modify rules
-at runtime. Supported control commands (message body):
-  - BLOCK_JID:<jid> - Permanently block a JID
-  - UNBLOCK_JID:<jid> - Remove permanent block
-  - BLOCK_KEY:<keyword> - Block messages containing keyword
-  - UNBLOCK_KEY:<keyword> - Remove keyword block
-  - RATE_LIMIT:<jid>:<rate>msg/s - Throttle messages from JID (e.g., "10msg/s")
-  - TEMP_BLOCK:<jid>:<duration>s - Temporary block (e.g., "30s")
-  - SUSPEND_ACCESS:<jid> - Suspend account (reversible)
-  - UNSUSPEND_ACCESS:<jid> - Restore suspended account
-  - QUARANTINE_ADVISORY:<incident_id> - Log quarantine recommendation
-  - ADMIN_ALERT:<type>:<incident_id>:<jid> - Alert administrators
-  - LIST - List all active rules
-
-The behaviour exposes coroutine helpers:
-  - await fw.allow_message(msg) -> bool
-  - await fw.send_through_firewall(to, body, metadata=None) -> bool (True if sent)
-
-Note: Node code must call firewall's send_through_firewall for outbound messages to
-ensure filtering. The behaviour also actively replies to control messages with a
-confirmation.
+This module implements the firewall logic for both standard nodes and routers,
+providing capabilities for blocklisting, rate limiting, and threat detection.
+It includes the base FirewallBehaviour and the specialized RouterFirewallBehaviour.
 """
 
 from typing import Optional, Set, Dict, Any
 import asyncio
 import time
-
 from spade.behaviour import CyclicBehaviour
 from spade.message import Message
 
@@ -42,55 +15,87 @@ from spade.message import Message
 class FirewallBehaviour(CyclicBehaviour):
     """A simple firewall behaviour that maintains blocklists and filters messages.
 
-    The behaviour does two things:
-      - Provides runtime rule management via control messages (protocol 'firewall-control').
-      - Exposes helpers to check outbound/inbound messages and to send messages through
-        the firewall (so NodeAgent can use it to guard outgoing traffic).
+    The behaviour provides runtime rule management via control messages and exposes
+    helpers to check outbound/inbound messages.
+
+    Attributes:
+        blocked_jids (Set[str]): Set of permanently blocked JIDs.
+        blocked_keywords (Set[str]): Set of blocked keywords in message body.
+        rate_limits (Dict[str, Dict]): Mapping JID -> rate limit config {max_per_sec, count, last_reset}.
+        temp_blocks (Dict[str, float]): Mapping JID -> expiry timestamp for temporary blocks.
+        suspended_accounts (Set[str]): Set of temporarily suspended JIDs.
     """
 
     def __init__(self, *args, default_blocked_jids: Optional[Set[str]] = None,
                  default_blocked_keywords: Optional[Set[str]] = None, **kwargs):
+        """Initialize firewall with optional default blocklists.
+
+        Args:
+            default_blocked_jids (Optional[Set[str]]): Initial set of blocked JIDs.
+            default_blocked_keywords (Optional[Set[str]]): Initial set of blocked keywords.
+        """
         super().__init__(*args, **kwargs)
         self.blocked_jids = set(default_blocked_jids or [])
         self.blocked_keywords = set(default_blocked_keywords or [])
-
-        # Rate limiting: jid -> {max_per_sec, count, last_reset_time}
         self.rate_limits: Dict[str, Dict[str, Any]] = {}
-
-        # Temporary blocks: jid -> expiry_timestamp
         self.temp_blocks: Dict[str, float] = {}
-
-        # Suspended accounts: set of JIDs
         self.suspended_accounts: Set[str] = set()
-
-        # Command lock for thread safety
         self._command_lock = asyncio.Lock()
 
     # Runtime rule management
     def block_jid(self, jid: str):
+        """Add JID to permanent blocklist.
+
+        Args:
+            jid (str): JID to block permanently.
+        """
         self.blocked_jids.add(jid)
 
     def unblock_jid(self, jid: str):
+        """Remove JID from permanent blocklist.
+
+        Args:
+            jid (str): JID to unblock.
+        """
         self.blocked_jids.discard(jid)
 
     def block_keyword(self, keyword: str):
+        """Add keyword to message body blocklist.
+
+        Args:
+            keyword (str): Keyword to block in messages.
+        """
         self.blocked_keywords.add(keyword)
 
     def unblock_keyword(self, keyword: str):
+        """Remove keyword from blocklist.
+
+        Args:
+            keyword (str): Keyword to unblock.
+        """
         self.blocked_keywords.discard(keyword)
 
     async def allow_message(self, msg: Message) -> bool:
-        """Return True if the message is allowed by the firewall rules.
+        """Check if message passes firewall rules.
 
-        Checks sender JID and message body keywords. If threats detected,
-        reports to router/monitor for incident response.
+        Flow:
+            1. Whitelist monitoring/response agents.
+            2. Whitelist control protocols (prevent loops).
+            3. Check suspended accounts.
+            4. Check temporary blocks (with expiration).
+            5. Check rate limits (messages per second).
+            6. Check permanent JID blocks.
+            7. Check keyword filtering.
+            8. Perform threat detection (malware, virus, exploit, etc.).
 
-        Also enforces:
-        - Rate limiting (messages per second)
-        - Temporary blocks (time-based expiration)
-        - Account suspensions (reversible blocks)
-        - Permanent JID blocks
-        - Keyword filtering
+        Args:
+            msg (Message): Incoming message to validate.
+
+        Returns:
+            bool: True if message allowed, False if blocked.
+
+        Note:
+            When threats are detected, sends an alert to the parent router for monitoring.
         """
         sender = str(msg.sender) if msg.sender is not None else None
         dst = None
@@ -99,11 +104,11 @@ class FirewallBehaviour(CyclicBehaviour):
         else:
             dst = str(msg.to) if msg.to else None
 
-        # WHITELIST: Allow messages from incident response and monitoring agents
+        # Allow messages from incident response and monitoring agents
         if sender and ("response" in sender or "monitor" in sender):
             return True
 
-        # WHITELIST: Don't scan control/alert messages (prevent infinite loops)
+        # Don't scan control/alert messages (prevent infinite loops)
         protocol = msg.metadata.get("protocol") if msg.metadata else None
         if protocol in ["firewall-control", "threat-alert", "network-copy"]:
             return True
@@ -147,17 +152,11 @@ class FirewallBehaviour(CyclicBehaviour):
             if kw and kw in body:
                 return False
 
-        # --- INÍCIO DA MODIFICAÇÃO (FIREWALLBEHAVIOUR) ---
         # Check for threats in message body (only for non-blocked senders)
         threat_keywords = [
             "malware", "virus", "exploit", "trojan", "worm",
             "ransomware"
-            # "failed login", "failed_login", "unauthorized" REMOVIDAS.
-            # Esta deteção passa a ser responsabilidade do MonitoringAgent,
-            # que usa "memória" (threshold) para evitar falsos positivos.
-            # A firewall local só deve detetar ameaças imediatas (malware).
         ]
-        # --- FIM DA MODIFICAÇÃO (FIREWALLBEHAVIOUR) ---
 
         threat_detected = False
         detected_keywords = []
@@ -180,9 +179,22 @@ class FirewallBehaviour(CyclicBehaviour):
         return True
 
     async def send_through_firewall(self, to: str, body: str, metadata: Optional[dict] = None) -> bool:
-        """Helper used by other behaviours to send messages via the firewall.
+        """Send message after applying firewall outbound checks.
 
-        Returns True if the message was sent, False if blocked.
+        Checks destination against blocklist and body against keywords.
+        Updates visualization and resource monitoring.
+
+        Args:
+            to (str): Destination JID.
+            body (str): Message body text.
+            metadata (Optional[dict]): Optional message metadata dict.
+
+        Returns:
+            bool: True if sent, False if blocked by firewall.
+
+        Note:
+            Adds 0.1s delay to simulate network latency.
+            Triggers resource monitor update on successful send.
         """
         # Build a fake message-like object for checking
         fake_msg = Message(to=to)
@@ -191,18 +203,14 @@ class FirewallBehaviour(CyclicBehaviour):
         fake_msg.body = body
 
         # Check destination against blocklist (some firewalls block destinations too)
-        # We'll treat blocked_jids as either sender or receiver to be simple
         if to in self.blocked_jids:
             return False
-
-        # Node/workstation firewall: apply blocklists for outbound sends as well.
-        # No special bypass behavior here.
 
         for kw in self.blocked_keywords:
             if kw and kw in body:
                 return False
 
-        # Emit packet event for visualization (node -> router/destination)
+        # Emit packet event for visualization
         viz = self.agent.get("_visualizer")
         if viz:
             print(f"[FIREWALL] Adding packet: {str(self.agent.jid)} -> {to}")
@@ -221,9 +229,7 @@ class FirewallBehaviour(CyclicBehaviour):
         # notify agent-level resource monitor (if present) about outbound send
         try:
             self.agent._force_pprint = True
-            # small one-shot adjustment to base cpu to simulate freeing/doing work
             try:
-                # negative adjust reduces the reported base CPU briefly
                 self.agent._send_adjust = -2.0
             except Exception:
                 pass
@@ -234,10 +240,25 @@ class FirewallBehaviour(CyclicBehaviour):
         return True
 
     async def _handle_control(self, msg: Message):
-        """Process an incoming control message to update rules.
+        """Process firewall control command and send confirmation reply.
 
-        Control messages must have protocol 'firewall-control' and body with one of
-        the supported commands.
+        Supported commands:
+        - BLOCK_JID:jid
+        - UNBLOCK_JID:jid
+        - BLOCK_KEY:keyword
+        - UNBLOCK_KEY:keyword
+        - RATE_LIMIT:jid:10msg/s
+        - TEMP_BLOCK:jid:15s
+        - SUSPEND_ACCESS:jid
+        - UNSUSPEND_ACCESS:jid
+        - QUARANTINE_ADVISORY:id
+        - LIST
+
+        Args:
+            msg (Message): Control message with protocol 'firewall-control'.
+
+        Returns:
+            None: Sends a reply message with OK/ERROR status asynchronously.
         """
         body = (msg.body or "").strip()
         reply = Message(to=str(msg.sender))
@@ -340,27 +361,6 @@ class FirewallBehaviour(CyclicBehaviour):
             reply.body = "OK QUARANTINE_ACKNOWLEDGED"
             await self.send(reply)
             return
-            reply.body = f"OK QUARANTINE_ADVISORY logged for {incident_id}"
-            await self.send(reply)
-            return
-
-        # ADMIN_ALERT - Alert administrators (informational)
-        if body.upper().startswith("ADMIN_ALERT:"):
-            parts = body.split(":")
-            if len(parts) >= 3:
-                incident_type = parts[1].strip()
-                incident_id = parts[2].strip()
-                offender = parts[3].strip() if len(parts) > 3 else "unknown"
-                print(f"[FIREWALL {self.agent.jid}] ⚠️  ADMIN ALERT: {incident_type}")
-                print(f"[FIREWALL {self.agent.jid}]    Incident: {incident_id}")
-                print(f"[FIREWALL {self.agent.jid}]    Offender: {offender}")
-                print(f"[FIREWALL {self.agent.jid}]    Action Required: Human review recommended")
-                reply.body = f"OK ADMIN_ALERT sent for {incident_id}"
-            else:
-                print(f"[FIREWALL {self.agent.jid}] ⚠️  ADMIN ALERT: {body}")
-                reply.body = "OK ADMIN_ALERT logged"
-            await self.send(reply)
-            return
 
         # LIST - Show all active rules
         if body.upper() == "LIST":
@@ -379,7 +379,14 @@ class FirewallBehaviour(CyclicBehaviour):
 
 
     async def run(self):
-        # Listen for incoming control messages and reply; otherwise idle
+        """Listen for and process firewall control messages.
+
+        Receives messages with protocol 'firewall-control' and delegates
+        to _handle_control(). Other messages are ignored by firewall.
+
+        Timeout:
+            1 second per cycle.
+        """
         msg = await self.receive(timeout=1)
         if msg:
             # Control messages are those explicitly labeled; others are ignored by firewall
@@ -387,43 +394,48 @@ class FirewallBehaviour(CyclicBehaviour):
             if proto == "firewall-control":
                 await self._handle_control(msg)
             else:
-                # not a control message — the firewall doesn't 'deliver' messages to the
-                # agent by itself; NodeAgent's RecvBehav will receive messages. The
-                # firewall can be used proactively for sending and for runtime rule updates.
                 pass
 
 
 class RouterFirewallBehaviour(FirewallBehaviour):
-    """Firewall behaviour specialised for routers.
+    """Firewall behaviour specialized for routers.
 
-    Routers should inspect traffic coming from or destined to outside the
-    local subnet, but allow intra-subnet forwarding without re-applying node
-    rules. This class overrides allow_message/send_through_firewall to implement
-    that explicit behaviour while keeping the same control-message handling.
+    Routers inspect traffic crossing subnet boundaries but allow
+    intra-subnet forwarding without re-applying node rules.
+
+    Key differences from base FirewallBehaviour:
+    - Uses 'original_sender' metadata (not direct sender).
+    - Allows local-to-local forwarding without keyword checks.
+    - Reports threats using original sender JID.
+
+    Attributes:
+        Inherits all attributes from FirewallBehaviour.
     """
 
-    # Em firewall.py
-
     async def allow_message(self, msg: Message) -> bool:
-        """Return True if the message is allowed by the firewall rules.
+        """Check if message passes router firewall rules.
 
-        Checks sender JID and message body keywords. If threats detected,
-        reports to router/monitor for incident response.
+        Uses 'original_sender' metadata (set by router) instead of direct sender
+        to correctly identify attackers in multi-hop routing.
 
-        Also enforces:
-        - Rate limiting (messages per second)
-        - Temporary blocks (time-based expiration)
-        - Account suspensions (reversible blocks)
-        - Permanent JID blocks
-        - Keyword filtering
+        Flow:
+            1. Extract original_sender from metadata (fallback to direct sender).
+            2. Whitelist monitoring/response agents.
+            3. Whitelist control protocols.
+            4. Check suspended accounts (original_sender).
+            5. Check temporary blocks (original_sender).
+            6. Check rate limits (original_sender).
+            7. Check permanent blocks (original_sender).
+            8. Check keyword filtering.
+            9. Perform threat detection, and report using original_sender.
+
+        Args:
+            msg (Message): Incoming message with metadata.
+
+        Returns:
+            bool: True if allowed, False if blocked.
         """
-
-        # --- INÍCIO DA CORREÇÃO ---
-        # O "remetente direto" é quem nos enviou a mensagem (ex: o router)
         direct_sender = str(msg.sender) if msg.sender is not None else None
-
-        # O "remetente original" é quem realmente a escreveu (ex: o atacante)
-        # O router adiciona isto aos metadados
         original_sender = msg.get_metadata("original_sender") if msg.metadata else None
         if not original_sender:
             original_sender = direct_sender  # Fallback se a mensagem for direta
@@ -434,16 +446,14 @@ class RouterFirewallBehaviour(FirewallBehaviour):
         else:
             dst = str(msg.to) if msg.to else None
 
-        # Se for um agente de segurança, confiamos nele.
+        # If direct sender is a monitoring/response agent, allow
         if direct_sender and ("response" in direct_sender or "monitor" in direct_sender):
             return True
 
-        # WHITELIST: Don't scan control/alert messages (prevent infinite loops)
+        # Don't scan control/alert messages (prevent infinite loops)
         protocol = msg.metadata.get("protocol") if msg.metadata else None
         if protocol in ["firewall-control", "threat-alert", "network-copy"]:
             return True
-
-        # TODAS AS VERIFICAÇÕES DE BLOQUEIO DEVEM USAR O "original_sender"
 
         # CHECK SUSPENDED ACCOUNTS (reversible block)
         if original_sender and original_sender in self.suspended_accounts:
@@ -474,7 +484,7 @@ class RouterFirewallBehaviour(FirewallBehaviour):
             if limit_data["count"] > limit_data["max_per_sec"]:
                 return False  # Rate limit exceeded
 
-        # CHECK PERMANENT BLOCKS FIRST (don't waste time analyzing blocked senders)
+        # CHECK PERMANENT BLOCKS FIRST
         body = (msg.body or "")
         if original_sender and original_sender in self.blocked_jids:
             return False  # Permanently blocked - no need to check threats-
@@ -484,14 +494,10 @@ class RouterFirewallBehaviour(FirewallBehaviour):
             if kw and kw in body:
                 return False
 
-        # --- INÍCIO DA MODIFICAÇÃO (ROUTERFIREWALLBEHAVIOUR) ---
-        # Check for threats in message body (only for non-blocked senders)
+        # Check for threats in message body
         threat_keywords = [
-            "malware", "virus", "exploit", "trojan", "worm",
-            "ransomware"
-            # "failed login", "failed_login", "unauthorized" REMOVIDAS.
+            "malware", "virus", "exploit", "trojan", "worm","ransomware"
         ]
-        # --- FIM DA MODIFICAÇÃO (ROUTERFIREWALLBEHAVIOUR) ---
 
         threat_detected = False
         detected_keywords = []
@@ -515,7 +521,26 @@ class RouterFirewallBehaviour(FirewallBehaviour):
         return True
 
     async def send_through_firewall(self, to: str, body: str, metadata: Optional[dict] = None) -> bool:
-        # Allow forwarding when both sender (this router) and destination are local
+        """Send message with router-specific firewall rules.
+
+        Allows local-to-local forwarding without keyword checks.
+        External sends apply full blocklist verification.
+
+        Flow:
+            1. Check if sender and receiver are in local nodes (local-to-local).
+            2. If local: Skip keyword checks, simulate latency, notify monitor.
+            3. If external: Apply full permanent blocklist check.
+            4. If external: Apply keyword check.
+            5. Simulate network latency (0.1s).
+
+        Args:
+            to (str): Destination JID.
+            body (str): Message body.
+            metadata (Optional[dict]): Optional metadata dict.
+
+        Returns:
+            bool: True if sent, False if blocked.
+        """
         try:
             local_nodes = self.agent.get("local_nodes") or set()
         except Exception:

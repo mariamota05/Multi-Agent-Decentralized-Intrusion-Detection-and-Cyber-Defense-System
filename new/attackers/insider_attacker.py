@@ -60,36 +60,37 @@ class InsiderAttacker(Agent):
 
         async def run(self):
             targets = self.agent.get("targets") or []
-            
+
             if not targets:
                 return
-            
+
             # Round-robin target selection
             target_index = self.agent.get("target_index") or 0
             target = targets[target_index % len(targets)]
             self.agent.set("target_index", (target_index + 1) % len(targets))
-            
+
             # Escalate attack over time
             if self.attempt_count < 5:
                 # Phase 1: Failed login attempts
                 if self.phase != 1:
                     self.phase = 1
                     _log("Phase 1: Failed login attempts")
-                msg_body = f"ATTACK: Failed login attempt for admin user (try #{self.attempt_count + 1})"
+                # CORREÇÃO: Incluir o alvo no corpo da mensagem
+                msg_body = f"ATTACK: Failed login attempt for admin user (try #{self.attempt_count + 1}) on TARGET:{target}"
                 phase = 1
             elif self.attempt_count < 10:
                 # Phase 2: Unauthorized access attempts
                 if self.phase != 2:
                     self.phase = 2
                     _log("[!] Phase 2: Escalating to unauthorized access attempts")
-                msg_body = f"ATTACK: Attempting unauthorized access to sensitive data"
+                msg_body = f"ATTACK: Attempting unauthorized access to sensitive data on TARGET:{target}"
                 phase = 2
             else:
                 # Phase 3: Persistent breach attempt
                 if self.phase != 3:
                     self.phase = 3
                     _log("[!!] Phase 3: Persistent data exfiltration attempts")
-                msg_body = "ATTACK: Persistent unauthorized access attempt - trying data exfiltration"
+                msg_body = f"ATTACK: Persistent unauthorized access attempt - trying data exfiltration on TARGET:{target}"
                 phase = 3
 
             try:
@@ -111,11 +112,11 @@ class InsiderAttacker(Agent):
             msg.set_metadata("task", json.dumps(task_data))
             msg.body = msg_body
             await self.send(msg)
-            
+
             _log(f"→ {target}: Phase {phase} - {msg_body[:60]}...")
-            
+
             self.attempt_count += 1
-            
+
             # Check if duration expired
             start_time = self.agent.get("attack_start_time") or 0
             duration = self.agent.get("duration") or 40
@@ -125,14 +126,14 @@ class InsiderAttacker(Agent):
 
     async def setup(self):
         _log(f"Insider threat attacker initialized: {self.jid}")
-        
+
         # Store attack start time
         self.set("attack_start_time", asyncio.get_event_loop().time())
-        
+
         # Start insider behavior (period = 3 seconds between attempts)
         behav = self.InsiderBehaviour(period=3.0)
         self.add_behaviour(behav)
-        
+
         duration = int(self.get("duration") or 40)
         max_attempts = duration // 3
         _log(f"Attack duration: {duration}s (~{max_attempts} attempts)")

@@ -1,32 +1,21 @@
 """Router agent for the simulated network.
 
-RouterAgent is implemented as a standalone SPADE Agent (not subclassing NodeAgent).
-It attaches a FirewallBehaviour, accepts messages from local nodes or other routers,
+RouterAgent attaches a FirewallBehaviour, accepts messages from local nodes or other routers,
 sends a copy of each message to configured monitoring agent(s) before forwarding,
 and forwards messages according to a simple static routing table.
 
 Message contract (convention): sending agents should send to the router JID and
 include the intended destination under metadata key 'dst' (exact destination JID).
-
-Usage example:
-  python new/router.py --jid router@localhost --password secret --local node1@localhost,node2@localhost --routes "node3@localhost:routerB@localhost" --monitors monitor@localhost
-
-Notes:
- - This implementation sends a copy to monitors first, then waits briefly and forwards.
- - Firewall control messages (protocol 'firewall-control') are supported by FirewallBehaviour.
 """
 
 import argparse
 import asyncio
 import datetime
 import getpass
-from typing import Dict, Set, List, Any, Tuple, Optional
+from typing import Dict, Set, List, Optional
 from collections import deque
 import json
 from spade.behaviour import CyclicBehaviour, PeriodicBehaviour
-from spade.behaviour import OneShotBehaviour
-from spade.template import Template
-import time
 
 import spade
 from spade.agent import Agent
@@ -36,6 +25,13 @@ from firewall import RouterFirewallBehaviour
 
 
 def _log(agent_type: str, jid: str, msg: str) -> None:
+    """Log formatted message with timestamp.
+
+    Args:
+        agent_type (str): Type of agent (e.g., "Router").
+        jid (str): Agent JID identifier.
+        msg (str): Message to log.
+    """
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] [{agent_type} {jid}] {msg}")
 
@@ -43,42 +39,31 @@ def _log(agent_type: str, jid: str, msg: str) -> None:
 class RouterAgent(Agent):
     """A simple router agent that forwards messages between nodes/routers.
 
-    Uses BFS-based intelligent routing that considers:
-    - Path length (minimum hops)
-    - Router resource utilization (CPU and bandwidth)
-    - Avoids overloading routers with high resource usage
+    Uses BFS-based intelligent routing that considers path length and resource utilization.
 
-    Attributes stored on the agent:
-      - routing_table: Dict[str, str] mapping destination JID or prefix -> next_hop_jid
-      - local_nodes: Set[str] of JIDs directly reachable
-      - monitor_jids: list of monitoring agent JIDs to receive copies
-      - router_neighbors: Dict[str, Dict] mapping router JID -> {cpu_usage, bandwidth_usage}
-      - cpu_usage: Current CPU usage percentage (updated by ResourceBehaviour)
-      - bandwidth_usage: Current bandwidth usage percentage (updated by ResourceBehaviour)
-      - messages_routed: Counter for messages processed (used to calculate resource load)
+    Attributes:
+        routing_table (Dict[str, str]): Mapping destination JID or prefix -> next_hop_jid.
+        local_nodes (Set[str]): Set of JIDs directly reachable from this router.
+        monitor_jids (List[str]): List of monitoring agent JIDs to receive copies.
+        router_neighbors (Dict[str, Dict]): Mapping router JID -> {cpu_usage, bandwidth_usage}.
+        cpu_usage (float): Current CPU usage percentage.
+        bandwidth_usage (float): Current bandwidth usage percentage.
+        messages_routed (int): Counter for messages processed.
+        firewall (RouterFirewallBehaviour): The attached firewall behaviour instance.
     """
 
     def find_best_path_bfs(self, destination: str) -> Optional[str]:
-        """
-        BFS-based path finding that considers router resources.
-        Returns the next hop that leads to the destination via the least costly path.
+        """Find the best path using BFS considering router resources.
 
-        **Cost Calculation:**
-          total_cost = hop_count × 1.0 + resource_usage × 0.5
+        Args:
+            destination (str): Target node JID (e.g., "router3_node0@localhost").
 
-          where:
-            - hop_count: number of routers in the path
-            - resource_usage = (cpu_usage + bandwidth_usage) / 200.0
-            - cpu_usage and bandwidth_usage are percentages (0-100)
+        Returns:
+            Optional[str]: Next hop JID if path found, None otherwise.
 
-          Example:
-            Path with 2 hops through router with 30% CPU and 20% bandwidth:
-            cost = 2 × 1.0 + (30 + 20)/200 × 0.5
-                 = 2.0 + 0.125
-                 = 2.125
-
-          This balances shortest path (hop_count) with resource availability,
-          preferring paths through less-loaded routers when hop counts are equal.
+        Note:
+            Cost formula: hop_count * 1.0 + resource_usage * 0.5
+            where resource_usage = (cpu + bandwidth) / 200.
         """
         routing_table = self.get("routing_table") or {}
         router_neighbors = self.get("router_neighbors") or {}
@@ -140,9 +125,23 @@ class RouterAgent(Agent):
         return None
 
     class ResourceBehaviour(PeriodicBehaviour):
-        """Periodically updates router resource metrics based on routing activity."""
+        """Periodically update router resource metrics based on routing activity.
+
+        Updates CPU and bandwidth usage every 2 seconds based on base load and
+        recent message routing activity.
+        """
 
         async def run(self):
+            """Calculate and update router resource metrics.
+
+            Metrics Calculated:
+                - CPU usage: Base (15%) + routing load (2% per message).
+                - Bandwidth usage: Base (8%) + routing load (1.5% per message).
+
+            Side Effects:
+                Updates 'cpu_usage' and 'bandwidth_usage' in agent storage.
+                Resets 'messages_routed' to 0.
+            """
             # Get current message count
             messages_routed = self.agent.get("messages_routed") or 0
 
@@ -172,7 +171,24 @@ class RouterAgent(Agent):
             self.agent.set("messages_routed", 0)
 
     class RouterBehav(CyclicBehaviour):
+        """Main routing behaviour handling message reception and forwarding.
+
+        This behaviour listens for incoming messages, applies firewall rules,
+        handles special protocols (node-death, threat-alert), forwards copies
+        to monitors, and routes packets to their destination.
+        """
+
         async def run(self):
+            """Process incoming messages and route to destination.
+
+            Flow:
+                1. Increment message counter for resource tracking.
+                2. Handle special protocols (node-death, threat-alert).
+                3. Apply inbound firewall check.
+                4. Forward copy to monitoring agents.
+                5. Route via BFS or static table.
+                6. Apply outbound firewall check.
+            """
             msg = await self.receive(timeout=1)
             if not msg:
                 return
@@ -184,7 +200,7 @@ class RouterAgent(Agent):
 
             # Check protocol for special messages
             protocol = msg.get_metadata("protocol")
-            
+
             # Handle node death notifications
             if protocol == "node-death":
                 dead_node = str(msg.sender)
@@ -196,7 +212,7 @@ class RouterAgent(Agent):
                     self.agent.set("local_nodes", local)
                     _log("Router", str(self.agent.jid), f"Removed {dead_node} from routing table - no longer forwarding")
                 return
-            
+
             # Check if this is a threat alert from a node firewall
             if protocol == "threat-alert":
                 _log("Router", str(self.agent.jid), f"Threat alert received: {msg.body}")
@@ -206,6 +222,16 @@ class RouterAgent(Agent):
                     fwd = Message(to=monitor_jid)
                     fwd.set_metadata("protocol", "threat-alert")
                     fwd.body = msg.body
+                    
+                    # Forward metadata needed for CNP auction
+                    if msg.metadata:
+                        if "offender" in msg.metadata:
+                            fwd.set_metadata("offender", msg.get_metadata("offender"))
+                        if "dst" in msg.metadata:
+                            fwd.set_metadata("dst", msg.get_metadata("dst"))
+                        if "threat_type" in msg.metadata:
+                            fwd.set_metadata("threat_type", msg.get_metadata("threat_type"))
+                    
                     await self.send(fwd)
                     _log("Router", str(self.agent.jid), f"Forwarded threat alert to {monitor_jid}")
                 return
@@ -225,7 +251,7 @@ class RouterAgent(Agent):
                     if "response" not in sender_jid:
                         _log("Router", str(self.agent.jid), f"Firewall allowed message from {sender_jid}")
 
-            # Try to parse body JSON for special control messages (e.g., cnp-request)
+
             dst = None
             parsed = None
             try:
@@ -233,14 +259,10 @@ class RouterAgent(Agent):
             except Exception:
                 parsed = None
 
-            # If this is a CNP request from a node asking the router to run the auction,
-            # (CNP functionality removed) normal forwarding continues
-
             # Determine destination for normal forwarding
             if msg.metadata and "dst" in msg.metadata:
                 dst = msg.metadata.get("dst")
             else:
-                # fallback: use msg.to if provided (may be router itself)
                 dst = str(msg.to) if msg.to else None
 
             if not dst:
@@ -254,30 +276,24 @@ class RouterAgent(Agent):
                 return
             ttl -= 1  # Decrement TTL for next hop
 
-            # --- INÍCIO DA SECÇÃO CORRIGIDA ---
-
-            # Determinar o remetente original ANTES de notificar o monitor
+            # Determine original sender
             original_sender = msg.get_metadata("original_sender") if msg.metadata else None
             if not original_sender:
-                original_sender = str(msg.sender)  # Na primeira paragem, o msg.sender é o original
+                original_sender = str(msg.sender)
 
-            # Send copy to monitoring agents first (so monitor sees traffic before forwarding)
+            # Send copy to monitoring agents first
             monitors = self.agent.get("monitor_jids") or []
             internal_monitors = self.agent.get("internal_monitor_jids") or []
-            # determine whether message is internal (both src and dst in local_nodes)
             local = self.agent.get("local_nodes") or set()
             sender_jid = str(msg.sender) if msg.sender else None
             is_internal = False
             if sender_jid and dst and local:
                 is_internal = (sender_jid in local and dst in local)
-            # choose which monitors to notify: internal monitors for intra-subnet traffic,
-            # otherwise global/external monitors
+
             target_monitors = internal_monitors if is_internal and internal_monitors else monitors
 
             for m in target_monitors:
-                # Enviar o CORPO ORIGINAL e os METADADOS CORRETOS para o monitor
                 copy_body = msg.body
-
                 copy_metadata = {
                     "protocol": "network-copy",
                     "original_sender": original_sender,
@@ -293,13 +309,10 @@ class RouterAgent(Agent):
                         cm.set_metadata(k, v)
                     await self.send(cm)
 
-            # --- FIM DA SECÇÃO CORRIGIDA ---
-
-            # Small pause to allow monitors to react (monitoring agents are simple and may update firewall rules)
-            # Also gives visualizer time to animate packets
+            # Small pause
             await asyncio.sleep(0.3)
 
-            # Forwarding decision: local nodes first, then intelligent BFS routing
+            # Forwarding decision
             local = self.agent.get("local_nodes") or set()
             routing: Dict[str, str] = self.agent.get("routing_table") or {}
 
@@ -308,24 +321,22 @@ class RouterAgent(Agent):
                 out = Message(to=dst)
                 out.body = msg.body
                 out.set_metadata("via", str(self.agent.jid))
-                out.set_metadata("ttl", str(ttl))  # Pass TTL along
-                out.set_metadata("original_sender", original_sender)  # Preserve original sender for replies
-                
-                # Preserve all original metadata from the attacker (e.g., protocol, task)
+                out.set_metadata("ttl", str(ttl))
+                out.set_metadata("original_sender", original_sender)
+
                 if msg.metadata:
                     for key, value in msg.metadata.items():
-                        if key not in ["dst", "via", "ttl", "original_sender"]:  # Don't overwrite routing metadata
+                        if key not in ["dst", "via", "ttl", "original_sender"]:
                             out.set_metadata(key, value)
-                
+
                 if fw:
-                    # Build complete metadata dict for firewall
                     fw_metadata = {"via": str(self.agent.jid), "ttl": str(ttl),
                                    "original_sender": original_sender}
                     if msg.metadata:
                         for key, value in msg.metadata.items():
                             if key not in ["dst", "via", "ttl", "original_sender"]:
                                 fw_metadata[key] = value
-                    
+
                     sent = await fw.send_through_firewall(dst, out.body, metadata=fw_metadata)
                     if sent:
                         _log("Router", str(self.agent.jid), f"Forwarded locally to {dst}")
@@ -333,24 +344,21 @@ class RouterAgent(Agent):
                         _log("Router", str(self.agent.jid), f"Firewall blocked forwarding to local {dst}")
                 else:
                     await self.send(out)
-                    print(f"Forwarded locally to {dst}")
-                    # Emit packet event for visualization (router -> local node) - only when not using firewall
+                    # Emit packet event for visualization
                     viz = self.agent.get("_visualizer")
                     if viz:
                         viz.add_packet(str(self.agent.jid), dst)
                 return
 
-            # Use BFS-based intelligent routing that considers router resources
+            # Intelligent routing
             next_hop = self.agent.find_best_path_bfs(dst)
 
-            # Fallback to simple routing table if BFS doesn't find a path
+            # Fallback to simple routing
             if not next_hop:
                 next_hop = routing.get(dst)
-                # simple prefix/pattern matching: allow keys ending with '*' to indicate prefix
                 if not next_hop:
                     for pat, nh in routing.items():
                         if pat.endswith("*"):
-                            # Extract destination prefix (e.g., "router3" from "router3_node0@localhost")
                             dst_prefix = dst.split("@")[0].rsplit("_", 1)[0] if "_" in dst.split("@")[0] else dst.split("@")[0]
                             pat_prefix = pat.rstrip("_*")
                             if dst_prefix == pat_prefix:
@@ -365,13 +373,9 @@ class RouterAgent(Agent):
             _log("Router", str(self.agent.jid),
                  f"[FWD] Forwarding to {next_hop.split('@')[0]} -> final dest: {dst.split('@')[0]}")
             fwd_body = msg.body
-            # Preserve original_sender through multi-hop routing
-            # (O 'original_sender' já foi determinado acima)
-            # Use firewall helper if present
+
             if fw:
-                sent_ok = await fw.send_through_firewall(next_hop, fwd_body,
-                                                         metadata={"dst": dst, "via": str(self.agent.jid),
-                                                                   "ttl": str(ttl), "original_sender": original_sender})
+                sent_ok = await fw.send_through_firewall(next_hop, fwd_body,metadata={"dst": dst, "via": str(self.agent.jid),"ttl": str(ttl), "original_sender": original_sender})
             else:
                 fwd = Message(to=next_hop)
                 fwd.body = fwd_body
@@ -388,23 +392,26 @@ class RouterAgent(Agent):
                 _log("Router", str(self.agent.jid), f"Firewall prevented forwarding to {next_hop} for dst {dst}")
 
     async def setup(self):
+        """Initialize router agent and attach behaviours.
+
+        Sets up resource tracking, firewall, routing structures, and starts
+        the main routing behaviours.
+        """
         _log("Router", str(self.jid), "starting...")
 
         # Initialize resource tracking
-        self.set("cpu_usage", 15.0)  # Base router CPU
-        self.set("bandwidth_usage", 8.0)  # Base router bandwidth
-        self.set("messages_routed", 0)  # Message counter
-        self.set("router_neighbors", {})  # Track neighbor router resources for BFS
+        self.set("cpu_usage", 15.0)
+        self.set("bandwidth_usage", 8.0)
+        self.set("messages_routed", 0)
+        self.set("router_neighbors", {})
 
         # attach a router-specific firewall behaviour and store reference
         fw = RouterFirewallBehaviour()
         self.add_behaviour(fw)
         self.set("firewall", fw)
 
-        # mark role so firewall can behave differently (router bypasses intra-subnet checks)
         self.set("role", "router")
 
-        # initialize routing structures but only set defaults if not already configured
         if not self.get("routing_table"):
             self.set("routing_table", {})
         if not self.get("local_nodes"):
@@ -414,7 +421,7 @@ class RouterAgent(Agent):
         if not self.get("internal_monitor_jids"):
             self.set("internal_monitor_jids", [])
 
-        # Print current configuration for visibility when the router starts
+        # Print current configuration
         rt = self.get("routing_table") or {}
         ln = self.get("local_nodes") or set()
         monitors = self.get("monitor_jids") or []
@@ -424,43 +431,58 @@ class RouterAgent(Agent):
         print(f"  routing_table: {rt}")
         print(f"  monitors: {monitors}, internal_monitors: {internal}")
 
-        # Start resource monitoring behaviour
+        # Start behaviours
         resource_behav = self.ResourceBehaviour(period=2.0)
         self.add_behaviour(resource_behav)
-
-        # add main router behaviour
         self.add_behaviour(self.RouterBehav())
 
-    # (CNP manager removed) router no longer implements start_cnp
-
-    # convenience helpers for runtime configuration
     def add_route(self, dst_pattern: str, next_hop: str):
+        """Add static route to routing table.
+
+        Args:
+            dst_pattern (str): Destination pattern (supports wildcard *).
+            next_hop (str): JID of next hop router.
+        """
         rt = self.get("routing_table") or {}
         rt[dst_pattern] = next_hop
         self.set("routing_table", rt)
 
     def add_local_node(self, jid: str):
+        """Register a node as directly attached to this router.
+
+        Args:
+            jid (str): Node JID to add to local nodes.
+        """
         ln = self.get("local_nodes") or set()
         ln.add(jid)
         self.set("local_nodes", ln)
-        # log when a node connects to this router
         _log("Router", str(self.jid), f"node {jid} connected; local_nodes now: {sorted(list(ln))}")
 
     def add_internal_monitor(self, jid: str):
+        """Add monitor for intra-subnet traffic.
+
+        Args:
+            jid (str): Internal monitor JID.
+        """
         ims = self.get("internal_monitor_jids") or []
         ims.append(jid)
         self.set("internal_monitor_jids", ims)
 
 
 async def main():
+    """Parse arguments and start router agent.
+
+    This function handles command-line arguments for configuring the router's
+    identity, connections, and initial routing table.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--jid", required=True, help="Router agent JID")
-    parser.add_argument("--password", required=False, help="Agent password; if omitted you'll be prompted")
-    parser.add_argument("--local", default="", help="Comma-separated local node JIDs attached to this router")
-    parser.add_argument("--routes", default="", help="Comma-separated routes in the form dst:next_hop (dst may use * as suffix for prefix match)")
-    parser.add_argument("--monitors", default="", help="Comma-separated monitoring agent JIDs to receive copies")
-    parser.add_argument("--internal-monitors", default="", help="Comma-separated monitoring agent JIDs for intra-subnet monitoring")
-    parser.add_argument("--no-auto-register", dest="auto_register", action="store_false", help="Disable auto_register when starting the agent")
+    parser.add_argument("--password", required=False, help="Agent password")
+    parser.add_argument("--local", default="", help="Comma-separated local node JIDs")
+    parser.add_argument("--routes", default="", help="Comma-separated routes dst:next_hop")
+    parser.add_argument("--monitors", default="", help="Comma-separated monitoring agent JIDs")
+    parser.add_argument("--internal-monitors", default="", help="Comma-separated internal monitoring agent JIDs")
+    parser.add_argument("--no-auto-register", dest="auto_register", action="store_false", help="Disable auto_register")
     args = parser.parse_args()
 
     passwd = args.password or getpass.getpass()
@@ -472,7 +494,6 @@ async def main():
     agent.set("monitor_jids", monitors)
     agent.set("internal_monitor_jids", internal_monitors)
 
-    # parse routes
     for r in [x.strip() for x in args.routes.split(',') if x.strip()]:
         if ':' in r:
             dst, nh = r.split(':', 1)

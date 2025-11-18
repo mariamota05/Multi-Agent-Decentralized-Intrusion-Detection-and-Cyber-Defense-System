@@ -94,7 +94,12 @@ class NodeAgent(Agent):
                 if is_dead:
                     return
 
-                # 2. Verificar Firewall
+                # 2. Check for self-isolation (reject all messages during backlog clearing)
+                self_isolated = self.agent.get("self_isolated") or False
+                if self_isolated:
+                    return
+
+                # 3. Verificar Firewall
                 fw = self.agent.get("firewall")
                 if fw:
                     allowed = await fw.allow_message(msg)
@@ -117,7 +122,10 @@ class NodeAgent(Agent):
                     infection_keywords = ["trojan", "worm", "exploit", "ransomware"]
                     for kw in infection_keywords:
                         if kw in body_lower:
-                            _log("NodeAgent", str(self.agent.jid), "[!!!] VULNERABILIDADE EXPLORADA. O nó está agora infetado.")
+                            # Store infection details including attacker intensity
+                            attacker_intensity = int(msg.get_metadata("attacker_intensity") or 5)
+                            self.agent.set("attacker_intensity", attacker_intensity)
+                            _log("NodeAgent", str(self.agent.jid), f"[!!!] VULNERABILIDADE EXPLORADA. O nó está agora infetado (intensity={attacker_intensity}).")
                             self.agent.set("is_infected", True)
                             # Iniciar a propagação (Worm)
                             behav = self.agent.WormPropagationBehav(period=10.0)
@@ -148,10 +156,73 @@ class NodeAgent(Agent):
 
                     if load > 5.0:
                          _log("NodeAgent", str(self.agent.jid), f"Scheduled task {tid}: duration={duration} load={load}")
+                    
+                    # IMMEDIATE CPU CHECK: Calculate CPU right after task addition to detect infection before accepting more messages
+                    base_cpu = float(self.agent.get("base_cpu") or 10.0)
+                    extra_cpu = sum(float(info.get("load", 0.0)) for info in active.values())
+                    infection_load = 20.0 if self.agent.get("is_infected") else 0.0
+                    send_adj = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
+                    current_cpu = min(100.0, base_cpu + extra_cpu + infection_load + send_adj)
+                    
+                    # Check if we crossed the infection detection threshold
+                    if current_cpu > 65.0 and not self.agent.get("self_isolated"):
+                        num_tasks = len(active)
+                        avg_cpu_per_task = (extra_cpu / num_tasks) if num_tasks > 0 else current_cpu
+                        
+                        # Infection signature: avg > 15% (normal=8.5%, infected=24%)
+                        if avg_cpu_per_task > 15.0:
+                            _log("NodeAgent", str(self.agent.jid), 
+                                 f"[!] IMMEDIATE DETECTION: CPU={current_cpu:.1f}% tasks={num_tasks} avg={avg_cpu_per_task:.1f}% - SELF-ISOLATING")
+                            self.agent.set("self_isolated", True)
+                            self.agent.set("isolation_start", _now_ts())
+                            # Signal ResourceBehav to send alert on next cycle
+                            self.agent.set("pending_infection_alert", True)
 
                 # --- TRATAMENTO DE MENSAGENS ---
 
-                if body_text.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:", "CLEAN_INFECTION:")):
+                if body_text.startswith("INFECT:"):
+                    # MALWARE INFECTION: Stealth malware from attacker
+                    protocol = msg.get_metadata("protocol") if msg.metadata else None
+                    malware_type = body_text.split("INFECT:", 1)[1].strip()
+                    was_infected = self.agent.get("is_infected") or False
+                    
+                    if protocol == "malware-infection":
+                        if not was_infected:
+                            # Store infection details including attacker intensity
+                            attacker_intensity = int(msg.get_metadata("attacker_intensity") or 5)
+                            self.agent.set("is_infected", True)
+                            self.agent.set("malware_type", malware_type)
+                            self.agent.set("attacker_intensity", attacker_intensity)
+                            
+                            # Get original attacker (not the router that forwarded it)
+                            infection_source = msg.get_metadata("original_sender") or str(msg.sender)
+                            self.agent.set("infection_source", infection_source)
+                            
+                            _log("NodeAgent", str(self.agent.jid), 
+                                 f"INFECTED with {malware_type} (intensity={attacker_intensity}) - Persistent +20% CPU overhead")
+                            
+                            # Notify monitoring agent about infection
+                            router = self.agent.get("router")
+                            if router:
+                                alert_msg = Message(to=router)
+                                alert_msg.set_metadata("protocol", "malware-infection")
+                                alert_msg.set_metadata("attacker_intensity", str(attacker_intensity))
+                                alert_msg.body = f"INFECTED:{malware_type}"
+                                await self.send(alert_msg)
+                                _log("NodeAgent", str(self.agent.jid), 
+                                     f"Notified router about infection")
+                            
+                            # Start worm propagation
+                            behav = self.agent.WormPropagationBehav(period=10.0)
+                            self.agent.add_behaviour(behav)
+                        else:
+                            _log("NodeAgent", str(self.agent.jid), 
+                                 f"Already infected, attempted re-infection with {malware_type}")
+                    else:
+                        _log("NodeAgent", str(self.agent.jid), 
+                             f"INFECT message received but protocol={protocol} (expected 'malware-infection')")
+
+                elif body_text.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:")):
                     # Comandos da Firewall/Resposta
                     if fw:
                         control_msg = Message(to=str(self.agent.jid))
@@ -159,6 +230,48 @@ class NodeAgent(Agent):
                         control_msg.body = body_text
                         control_msg.sender = msg.sender
                         await fw._handle_control(control_msg)
+
+                elif body_text.startswith("CURE_INFECTION"):
+                    # HARD RESET: Probabilistic malware removal based on attacker intensity
+                    is_infected = self.agent.get("is_infected") or False
+                    if is_infected:
+                        attacker_intensity = self.agent.get("attacker_intensity") or 5
+                        malware_type = self.agent.get("malware_type") or "unknown"
+                        
+                        # Calculate cure success rate: 100 - (intensity × 7) → 30% to 93%
+                        base_success = 100 - (attacker_intensity * 7)
+                        cure_success_rate = max(30, min(95, base_success))
+                        
+                        _log("NodeAgent", str(self.agent.jid), 
+                             f"HARD RESET INITIATED: Attempting to remove {malware_type} (intensity={attacker_intensity}, success_rate={cure_success_rate:.0f}%)")
+                        
+                        # Probabilistic cure
+                        import random
+                        if random.random() * 100 < cure_success_rate:
+                            # SUCCESS: Perform hard reset
+                            active_tasks = self.agent.get("active_tasks") or {}
+                            num_tasks_cleared = len(active_tasks)
+                            
+                            # Clear all tasks
+                            self.agent.set("active_tasks", {})
+                            
+                            # Remove infection
+                            self.agent.set("is_infected", False)
+                            self.agent.set("malware_type", None)
+                            self.agent.set("attacker_intensity", None)
+                            self.agent.set("infection_source", None)
+                            
+                            # End self-isolation if active
+                            self.agent.set("self_isolated", False)
+                            
+                            _log("NodeAgent", str(self.agent.jid), 
+                                 f"[OK] HARD RESET COMPLETE: {malware_type} removed, {num_tasks_cleared} tasks cleared, resources reset")
+                        else:
+                            # FAILURE: Malware has rootkit/persistence, hard reset failed
+                            _log("NodeAgent", str(self.agent.jid), 
+                                 f"[FAIL] HARD RESET FAILED: {malware_type} has advanced persistence mechanisms (rootkit/firmware)")
+                    else:
+                        _log("NodeAgent", str(self.agent.jid), "Not infected, hard reset command ignored")
 
                 elif body_text.upper() == "PING":
                     # MÉTRICA: Serviço Legítimo
@@ -242,6 +355,71 @@ class NodeAgent(Agent):
                 ticks = self.agent.get("cpu_overload_ticks") or 0
                 self.agent.set("cpu_overload_ticks", ticks + 1)
 
+            # 3.5. SANITY CHECK - Immediate detection at 70% CPU threshold (buffer before 100% crash)
+            if cpu_usage > 70.0:
+                num_tasks = len(active)
+                total_task_load = extra_cpu  # Already calculated above
+                
+                # Calculate average CPU per task
+                avg_cpu_per_task = (total_task_load / num_tasks) if num_tasks > 0 else cpu_usage
+                
+                # SCENARIO 1: High CPU per task → Infection detected
+                # Normal tasks: ~8.5% avg (2% recv + 5% proc + 1.5% send)
+                # Infected tasks: ~28.5% avg (22% recv + 5% proc + 1.5% send)
+                if avg_cpu_per_task > 15.0 or (num_tasks == 0 and cpu_usage > 70.0):
+                    # CRITICAL: Self-isolate immediately to prevent crash while waiting for cure
+                    # This must happen EVERY time we detect infection, not just when alerting
+                    self_isolated = self.agent.get("self_isolated") or False
+                    if not self_isolated:
+                        _log("NodeAgent", str(self.agent.jid), 
+                             f"INFECTION DETECTED: CPU={cpu_usage:.1f}% tasks={num_tasks} avg/task={avg_cpu_per_task:.1f}%")
+                        _log("NodeAgent", str(self.agent.jid), 
+                             f"Normal avg is 5-10%, detected {avg_cpu_per_task:.1f}% - SELF-ISOLATING NOW")
+                        
+                        self.agent.set("self_isolated", True)
+                        self.agent.set("isolation_start", now)
+                    
+                    # Send threat alert (rate-limited to avoid spam)
+                    last_alert = self.agent.get("last_infection_alert") or 0
+                    if now - last_alert > 10.0:
+                        router = self.agent.get("router")
+                        if router:
+                            alert_msg = Message(to=router)
+                            alert_msg.set_metadata("protocol", "threat-alert")
+                            alert_msg.set_metadata("threat_type", "suspected_malware")
+                            alert_msg.set_metadata("dst", str(self.agent.jid))  # I am the victim needing cure
+                            
+                            # Include infection source as offender if known
+                            infection_source = self.agent.get("infection_source") or "unknown"
+                            alert_msg.set_metadata("offender", infection_source)
+                            
+                            alert_msg.body = f"INFECTED:CPU={cpu_usage:.1f}%,tasks={num_tasks},avg={avg_cpu_per_task:.1f}%"
+                            await self.send(alert_msg)
+                            _log("NodeAgent", str(self.agent.jid), "Sent infection alert to router/monitor")
+                            self.agent.set("last_infection_alert", now)
+                
+                # SCENARIO 2: Normal CPU per task → Just overloaded with legitimate work
+                elif avg_cpu_per_task <= 15.0:
+                    self_isolated = self.agent.get("self_isolated") or False
+                    if not self_isolated:
+                        _log("NodeAgent", str(self.agent.jid), 
+                             f"HIGH LOAD: CPU={cpu_usage:.1f}% tasks={num_tasks} avg/task={avg_cpu_per_task:.1f}%")
+                        _log("NodeAgent", str(self.agent.jid), 
+                             "Normal task overhead detected - SELF-ISOLATING to clear backlog")
+                        self.agent.set("self_isolated", True)
+                        self.agent.set("isolation_start", now)
+                        self.agent.set("isolation_start", now)
+            
+            # Check if we can end self-isolation
+            elif cpu_usage < 40.0:
+                self_isolated = self.agent.get("self_isolated") or False
+                if self_isolated:
+                    isolation_start = self.agent.get("isolation_start") or now
+                    duration = now - isolation_start
+                    _log("NodeAgent", str(self.agent.jid), 
+                         f"Backlog cleared (CPU={cpu_usage:.1f}%) - Ending self-isolation after {duration:.1f}s")
+                    self.agent.set("self_isolated", False)
+
             # 4. Verificar Morte (Crash a 100%)
             if cpu_usage >= 100.0:
                 _log("NodeAgent", str(self.agent.jid), "FATAL: CPU a 100%. O nó CRASHOU e está offline.")
@@ -275,7 +453,14 @@ class NodeAgent(Agent):
             if cpu_usage > 15.0:
                 _log("NodeAgent", str(self.agent.jid), f"Load: CPU={cpu_usage:.1f}% (Infected={self.agent.get('is_infected')})")
 
-            await asyncio.sleep(1.0)
+            # Check if immediate CPU check was requested (task just added)
+            immediate_check = self.agent.get("immediate_cpu_check") or False
+            if immediate_check:
+                # Reset flag and skip sleep to process immediately
+                self.agent.set("immediate_cpu_check", False)
+                await asyncio.sleep(0.01)  # Minimal delay to yield control
+            else:
+                await asyncio.sleep(1.0)  # Normal periodic check
 
     async def setup(self):
         _log("NodeAgent", str(self.jid), "starting...")
@@ -290,6 +475,7 @@ class NodeAgent(Agent):
         self.set("base_cpu", self.get("base_cpu") or 10.0)
         self.set("base_bw", 5.0)
         self.set("active_tasks", {})
+        self.set("self_isolated", False)
 
         fw = FirewallBehaviour()
         self.add_behaviour(fw)
