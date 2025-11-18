@@ -106,7 +106,7 @@ class DDoSAttacker(Agent):
             _log(f"[+] Burst #{self.burst_count} complete ({burst_size} messages sent)")
             
             if self.burst_count < self.max_bursts:
-                _log(f"⏸Waiting 5 seconds before next burst...")
+                _log(f"Waiting 5 seconds before next burst...")
                 await asyncio.sleep(5.0)
 
     async def setup(self):

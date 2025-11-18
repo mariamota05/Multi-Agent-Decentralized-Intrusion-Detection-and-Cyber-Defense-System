@@ -6,12 +6,22 @@ This folder contains specialized attack agents, each implementing a different ty
 
 ### 🦠 Malware Attacker (`malware_attacker.py`)
 
-**What it does:** Sends malicious payloads with trojan/virus/ransomware keywords
+**What it does:** Infects nodes with persistent malware that degrades performance
 
 **Characteristics:**
-- Low-volume periodic attacks (stealth)
-- CPU load: intensity × 5% for 3 seconds
+- Sends infection payloads (trojan, cryptominer, keylogger, ransomware, etc.)
+- **Once infected:** Node gets +20% CPU overhead on EVERY message processed
+- Infection persists until incident response sends cure command
+- Low-volume periodic attacks (stealth timing)
 - Attack period: Slower at low intensity, faster at high intensity
+
+**Infection mechanism:**
+1. Attacker sends `INFECT:malware.type` message
+2. Node receives and processes infection (3% CPU initial load)
+3. Node's internal state set to `malware_infection=True`
+4. **ALL subsequent message processing** gets +20% CPU penalty
+5. Simulates malware running in background (cryptominer, keylogger, etc.)
+6. Only removable by incident response `CURE_INFECTION` command
 
 **How to run:**
 ```bash
@@ -24,9 +34,14 @@ python attackers/malware_attacker.py \
 ```
 
 **Expected response:**
-- ✓ Immediate permanent block
+- ✓ Immediate permanent block (stops new infections)
+- ✓ Cure command sent to all nodes (removes existing infections)
 - ✓ Quarantine advisory to all nodes
-- ✓ Fastest response (0.3s)
+- ✓ Fastest response (0.3s - malware spreads fast!)
+
+**Watch for in logs:**
+- `⚠️  INFECTED with malware.type - All message processing +20% CPU!`
+- `✓ CURED: malware.type removed - Performance restored!`
 
 ---
 

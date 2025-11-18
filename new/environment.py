@@ -90,7 +90,7 @@ NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
              ("ddos", ["router2_node1@localhost"], 7, 30, 5),
              ("stealth_malware", ["router0_node0@localhost", "router3_node1@localhost"], 4, 50, 2)]'''
 
-ATTACKERS = [("ddos", ["router2_node1@localhost"], 7, 30, 5)]
+ATTACKERS = [("stealth_malware", ["router2_node1@localhost"], 5, 30, 3)]
 
 # ============================================================================
 # MESSAGE TESTING (optional - for testing routing)
@@ -110,7 +110,18 @@ ATTACKERS = [("ddos", ["router2_node1@localhost"], 7, 30, 5)]
 #     (1, 1, 2, 0, "REQUEST: status", 5),         # Request processing after 5 seconds
 #     (0, 1, 2, 1, "Hello from router0", 8),      # Custom message after 8 seconds
 # ]
-SCHEDULED_MESSAGES = []
+# Send burst of traffic to infected node to trigger CPU spike (all at same time)
+# This simulates normal workload that would trigger self-detection when infected
+SCHEDULED_MESSAGES = [
+    (0, 0, 2, 1, "REQUEST: process_data", 10),
+    (1, 0, 2, 1, "REQUEST: analyze_logs", 10),
+    (3, 0, 2, 1, "REQUEST: sync_database", 10),
+    (4, 0, 2, 1, "REQUEST: backup_files", 10),
+    (0, 1, 2, 1, "REQUEST: compile_report", 10),
+    (1, 1, 2, 1, "REQUEST: verify_checksum", 10),
+    (3, 1, 2, 1, "REQUEST: index_documents", 10),
+    (4, 1, 2, 1, "REQUEST: optimize_cache", 10),
+]
 
 # ============================================================================
 # RESOURCES (usually don't need to change)
@@ -422,7 +433,8 @@ async def send_scheduled_messages(
     from spade.message import Message
     from spade.behaviour import OneShotBehaviour
     
-    for from_r, from_n, to_r, to_n, msg_body, delay in messages:
+    async def send_single_message(from_r, from_n, to_r, to_n, msg_body, delay):
+        """Helper to send a single message after delay."""
         await asyncio.sleep(delay)
         
         # Find sender node
@@ -436,7 +448,7 @@ async def send_scheduled_messages(
         
         if not sender:
             _log("environment", f"[WARN] Sender router{from_r}_node{from_n} not found")
-            continue
+            return
         
         # Build final destination JID
         destination = f"router{to_r}_node{to_n}@{domain}"
@@ -453,6 +465,13 @@ async def send_scheduled_messages(
         # Add and start the behavior
         sender.add_behaviour(SendMessageBehaviour())
         _log("environment", f"[SCHED] Scheduled message sent: router{from_r}_node{from_n} -> router{to_r}_node{to_n}: {msg_body}")
+    
+    # Create all message sending tasks simultaneously (they will all sleep in parallel)
+    tasks = [
+        send_single_message(from_r, from_n, to_r, to_n, msg_body, delay)
+        for from_r, from_n, to_r, to_n, msg_body, delay in messages
+    ]
+    await asyncio.gather(*tasks)
 
 
 def main():

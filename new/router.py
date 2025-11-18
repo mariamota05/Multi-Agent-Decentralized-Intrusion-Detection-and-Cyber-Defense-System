@@ -295,13 +295,24 @@ class RouterAgent(Agent):
                 out.body = msg.body
                 out.set_metadata("via", str(self.agent.jid))
                 out.set_metadata("ttl", str(ttl))  # Pass TTL along
-                # Preserve original sender through the routing chain
-                # (O 'original_sender' já foi determinado acima)
                 out.set_metadata("original_sender", original_sender)  # Preserve original sender for replies
+                
+                # Preserve all original metadata from the attacker (e.g., protocol, task)
+                if msg.metadata:
+                    for key, value in msg.metadata.items():
+                        if key not in ["dst", "via", "ttl", "original_sender"]:  # Don't overwrite routing metadata
+                            out.set_metadata(key, value)
+                
                 if fw:
-                    sent = await fw.send_through_firewall(dst, out.body,
-                                                          metadata={"via": str(self.agent.jid), "ttl": str(ttl),
-                                                                    "original_sender": original_sender})
+                    # Build complete metadata dict for firewall
+                    fw_metadata = {"via": str(self.agent.jid), "ttl": str(ttl),
+                                   "original_sender": original_sender}
+                    if msg.metadata:
+                        for key, value in msg.metadata.items():
+                            if key not in ["dst", "via", "ttl", "original_sender"]:
+                                fw_metadata[key] = value
+                    
+                    sent = await fw.send_through_firewall(dst, out.body, metadata=fw_metadata)
                     if sent:
                         _log("Router", str(self.agent.jid), f"Forwarded locally to {dst}")
                     else:

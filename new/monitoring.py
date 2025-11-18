@@ -352,8 +352,13 @@ class MonitoringAgent(Agent):
 
                 # --- LÓGICA DE CLASSIFICAÇÃO DE AMEAÇA MELHORADA ---
                 threat_type = "unknown"
+                protocol = copy_metadata.get("protocol") if copy_metadata else None
+                
+                # Check for malware infection protocol
+                if protocol == "malware-infection":
+                    threat_type = "malware"
                 # Usar startswith() para evitar que "rate:" corresponda a "keyword_rate:"
-                if any(r.startswith("rate:") for r in reasons):
+                elif any(r.startswith("rate:") for r in reasons):
                     threat_type = "ddos"
                 elif any(r.startswith("keyword_rate:") for r in reasons):
                     # Se foi a taxa de keywords que disparou (ex: failed login)

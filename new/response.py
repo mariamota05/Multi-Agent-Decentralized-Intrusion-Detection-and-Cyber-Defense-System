@@ -215,9 +215,9 @@ class IncidentResponseAgent(Agent):
             nodes_to_protect = self.agent.get("nodes_to_protect") or []
             
             if threat_type == "malware":
-                # STRATEGY: Aggressive containment - immediate block + quarantine
+                # STRATEGY: Aggressive containment - immediate block + cure infections + quarantine
                 _log("IncidentResponse", str(self.agent.jid), 
-                     f"MITIGATION: Malware containment - blocking {offender_jid} across all nodes")
+                     f"MITIGATION: Malware containment - blocking {offender_jid} and curing infections")
                 
                 await asyncio.sleep(0.3)  # Quick response critical
                 
@@ -231,9 +231,22 @@ class IncidentResponseAgent(Agent):
                     blocked_count += 1
                 
                 _log("IncidentResponse", str(self.agent.jid), 
-                     f"MITIGATION COMPLETE: {offender_jid} permanently blocked on {blocked_count} nodes - further attacks will be rejected")
+                     f"MITIGATION: {offender_jid} permanently blocked on {blocked_count} nodes")
                 
-                # 2. Send quarantine advisory (informational - nodes could isolate infected systems)
+                # 2. Cure malware infections on all nodes (HARD RESET)
+                await asyncio.sleep(0.2)  # Brief delay
+                cured_count = 0
+                for node_jid in nodes_to_protect:
+                    cure = Message(to=node_jid)
+                    cure.set_metadata("protocol", "malware-cure")
+                    cure.body = "CURE_INFECTION"
+                    await self.send(cure)
+                    cured_count += 1
+                
+                _log("IncidentResponse", str(self.agent.jid), 
+                     f"MITIGATION: HARD RESET sent to {cured_count} nodes - Killing infected processes & clearing malware")
+                
+                # 3. Send quarantine advisory (informational - nodes could isolate infected systems)
                 for node_jid in nodes_to_protect:
                     advisory = Message(to=node_jid)
                     advisory.set_metadata("protocol", "firewall-control")
@@ -241,7 +254,7 @@ class IncidentResponseAgent(Agent):
                     await self.send(advisory)
                 
                 _log("IncidentResponse", str(self.agent.jid), 
-                     f"MITIGATION: Sent quarantine advisory for incident {incident_id}")
+                     f"MITIGATION COMPLETE: Attacker blocked, nodes hard reset (processes killed), quarantine advisory sent")
                 
                 return True
                 
