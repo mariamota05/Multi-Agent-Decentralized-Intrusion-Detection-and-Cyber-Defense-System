@@ -1,0 +1,15 @@
+Timestamp,Scenario_Attack,Scenario_Intensity,Metric1_Detection_Rate,Metric2a_False_Positives,Metric2b_False_Negatives,Metric3_Response_Time,Metric4_Network_Resilience,Metric4_Service_Availability,Metric5_Collab_Efficiency,Metric6_Victim_Peak_CPU,Metric7_Victim_Crashed,Raw_Overload_Cycles,Raw_Leakage_Count
+2025-11-18 14:02:10,ddos,1,100%,0%,6 msgs (20.0%),3.082s,100.0%,5 Pings OK,High (Optimal Protection),22.0%,NO,0,6
+2025-11-18 14:03:28,ddos,9,100%,0%,4 msgs (1.5%),3.152s,90.0%,1 Pings OK,Low (System Crash),100.0%,YES,1,4
+2025-11-18 14:04:38,ddos,5,100%,0%,12 msgs (8.0%),3.090s,100.0%,5 Pings OK,High (Optimal Protection),70.0%,NO,0,12
+2025-11-18 14:05:45,ddos,7,100%,0%,11 msgs (5.2%),3.088s,100.0%,4 Pings OK,High (Optimal Protection),94.0%,NO,1,11
+2025-11-18 14:15:44,ddos,1,100%,0%,6 msgs (20.0%),3.126s,100.0%,5 Pings OK,High (Optimal Protection),22.0%,NO,0,6
+2025-11-18 14:16:56,ddos,1,100%,0%,6 msgs (20.0%),3.083s,100.0%,5 Pings OK,High (Optimal Protection),19.0%,NO,0,6
+2025-11-18 14:18:03,ddos,1,100%,0%,6 msgs (20.0%),3.115s,100.0%,5 Pings OK,High (Optimal Protection),19.0%,NO,0,6
+2025-11-18 14:19:19,ddos,1,100%,0%,6 msgs (20.0%),3.089s,100.0%,5 Pings OK,High (Optimal Protection),19.0%,NO,0,6
+2025-11-18 14:20:14,ddos,1,100%,0%,6 msgs (20.0%),3.095s,100.0%,5 Pings OK,High (Optimal Protection),19.0%,NO,0,6
+2025-11-18 14:22:18,ddos,1,100%,0%,6 msgs (20.0%),3.050s,100.0%,5 Pings OK,High (Optimal Protection),19.0%,NO,0,6
+2025-11-18 14:23:27,ddos,1,100%,0%,6 msgs (20.0%),3.012s,100.0%,5 Pings OK,High (Optimal Protection),22.0%,NO,0,6
+2025-11-18 14:24:31,ddos,1,100%,0%,6 msgs (20.0%),3.059s,100.0%,5 Pings OK,High (Optimal Protection),19.0%,NO,0,6
+2025-11-18 14:25:25,ddos,1,100%,0%,6 msgs (20.0%),3.071s,100.0%,5 Pings OK,High (Optimal Protection),22.0%,NO,0,6
+2025-11-18 14:26:47,ddos,3,100%,0%,12 msgs (13.3%),3.062s,100.0%,5 Pings OK,High (Optimal Protection),46.0%,NO,0,12

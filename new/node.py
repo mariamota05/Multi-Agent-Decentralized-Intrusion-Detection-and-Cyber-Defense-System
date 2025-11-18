@@ -1,21 +1,15 @@
 """
 Simple workstation/server node using SPADE.
 
-This NodeAgent acts like a workstation or server: it listens for messages and
-responds to requests. It can also optionally send periodic heartbeats to a list
-of peers, and supports an interactive mode to send manual messages.
+Features:
+- Resource Simulation (CPU/Bandwidth)
+- Firewall Integration
+- Metrics Collection (DDoS Leakage, Overload, Service Uptime)
+- Malware Simulation (Vulnerability, Infection, Propagation via 'Worm')
+- Health Reporting (For anomaly detection)
 
 Usage:
- - run the script and provide the agent JID and password
- - provide a comma-separated list of peer JIDs (optional)
- - set a heartbeat interval (seconds) or 0 to disable
- - choose interactive mode to type messages to send
-
-Notes:
- - SPADE does not provide an XMPP server. You must have an XMPP server running
-   (Prosody, ejabberd or public service) and the agent accounts registered there.
- - The agent will attempt auto_register=True; if the server does not allow in-band
-   registration, create accounts on the server instead.
+  Called by environment.py automatically.
 """
 
 import argparse
@@ -23,10 +17,6 @@ import asyncio
 import datetime
 import json
 import random
-
-
-def _now_ts():
-    return asyncio.get_event_loop().time()
 import getpass
 
 import spade
@@ -36,148 +26,112 @@ from spade.message import Message
 from firewall import FirewallBehaviour
 
 
-def _log(agent_type: str, jid: str, msg: str) -> None:
-    """Uniform log helper used across this file.
+def _now_ts():
+    return asyncio.get_event_loop().time()
 
-    Format: [HH:MM:SS] [<AgentType> <jid>] <msg>
-    """
+
+def _log(agent_type: str, jid: str, msg: str) -> None:
     ts = datetime.datetime.now().strftime("%H:%M:%S")
     print(f"[{ts}] [{agent_type} {jid}] {msg}")
 
 
-# Note: the user requested no XMPP server probe. SPADE is expected to be
-# available and a running XMPP server (or service) with accounts configured.
-
-
 class NodeAgent(Agent):
-    """An agent that listens and responds to messages and can send heartbeats.
+    """An agent that listens/responds to messages and simulates a computer node."""
 
-    Behaviours:
-      - RecvBehav: waits for messages and handles simple commands:
-            * 'PING' -> replies 'PONG'
-            * 'REQUEST:<text>' -> replies 'RESPONSE:<text processed>'
-      - HeartbeatBehav: periodically sends 'HEARTBEAT' messages to configured peers.
-    """
+    class WormPropagationBehav(PeriodicBehaviour):
+        """
+        WORM BEHAVIOUR
+        Corre apenas se o nó estiver infetado.
+        Tenta espalhar a carga (ataque) para vizinhos de forma furtiva.
+        """
+        async def run(self):
+            # Se o nó for limpo ou morrer, este comportamento para
+            if not self.agent.get("is_infected") or self.agent.get("node_dead"):
+                self.kill()
+                return
+
+            # Tenta encontrar o router para enviar a mensagem
+            router = self.agent.get("router")
+            if not router:
+                return
+
+            # --- Encontrar um Alvo Aleatório ---
+            # Tenta atacar o "irmão" (outro nó no mesmo router)
+            my_jid_str = str(self.agent.jid)
+            try:
+                base, domain = my_jid_str.split('@')
+                router_prefix, node_part = base.split('_node')
+                my_index = int(node_part)
+                # Ataca o outro nó (0 -> 1, 1 -> 0) - Lógica simples para 2 nós/router
+                peer_index = 1 - my_index
+                target_node = f"{router_prefix}_node{peer_index}@{domain}"
+            except Exception:
+                return
+
+            # --- A Mensagem-Armadilha Furtiva ---
+            msg = Message(to=router)
+            msg.set_metadata("dst", target_node)
+            msg.set_metadata("protocol", "worm-payload")
+
+            # O corpo parece benigno (PING)
+            msg.body = "PING"
+
+            # A "bomba" de CPU: Causa 20% de carga na vítima por 10 segundos
+            task_data = {
+                "cpu_load": 20.0,
+                "duration": 10.0
+            }
+            msg.set_metadata("task", json.dumps(task_data))
+
+            await self.send(msg)
 
     class RecvBehav(CyclicBehaviour):
         async def run(self):
             msg = await self.receive(timeout=10)
             if msg:
-                # Check if node is dead (crashed from 100% CPU)
+                # 1. Verificar se o nó está morto (Crash por CPU)
                 is_dead = self.agent.get("node_dead") or False
                 if is_dead:
-                    # Dead nodes don't process any messages
                     return
-                
-                # Check firewall (if present) for inbound messages
-                fw = None
-                try:
-                    fw = self.agent.get("firewall")
-                except Exception:
-                    fw = None
+
+                # 2. Verificar Firewall
+                fw = self.agent.get("firewall")
                 if fw:
                     allowed = await fw.allow_message(msg)
                     if not allowed:
-                        _log("NodeAgent", str(self.agent.jid), f"Firewall blocked inbound message from {msg.sender}")
                         return
-                
-                # Don't log firewall control messages (they're internal)
-                protocol = msg.get_metadata("protocol") if msg.metadata else None
-                if protocol != "firewall-control":
-                    _log("NodeAgent", str(self.agent.jid), f"Received from {msg.sender}: {msg.body}")
-                
-                # Emit packet event for visualization (router -> node)
-                viz = self.agent.get("_visualizer")
-                if viz and msg.metadata and msg.metadata.get("via"):
-                    via = msg.metadata.get("via")
-                    viz.add_packet(via, str(self.agent.jid))
-                
-                # EVERY message processing consumes base resources
-                # Add a small processing task for receiving and parsing the message
-                active = self.agent.get("active_tasks") or {}
-                counter = self.agent.get("task_counter") or 0
-                counter += 1
-                tid = f"recv-{counter}"
-                self.agent.set("task_counter", counter)
-                
-                # Base message processing: 1.5% CPU for 0.5 seconds (lightweight)
-                base_load = 1.5
-                
-                # MALWARE INFECTION: Apply persistent overhead if infected
-                is_infected = self.agent.get("malware_infection") or False
-                if is_infected:
-                    base_load += 20.0  # +20% CPU overhead from malware running in background
-                
-                # Check if node is in self-isolation mode
-                # BUT allow CURE_INFECTION messages through (critical system messages)
+
+                # --- MÉTRICAS DDOS: LEAKAGE ---
+                # Se chegou aqui, a firewall deixou passar.
+                protocol = msg.get_metadata("protocol")
+                if protocol == "attack":
+                    count = self.agent.get("ddos_packets_received") or 0
+                    self.agent.set("ddos_packets_received", count + 1)
+
                 body_text = (msg.body or "").strip()
-                is_cure_msg = body_text.startswith("CURE_INFECTION")
-                is_isolated = self.agent.get("self_isolated") or False
-                if is_isolated and not is_cure_msg:
-                    _log("NodeAgent", str(self.agent.jid), "ISOLATED - Rejecting new message to process backlog")
-                    return  # Don't process new messages during isolation
-                
-                active[tid] = {"end": _now_ts() + 0.5, "load": base_load}
-                self.agent.set("active_tasks", active)
-                
-                # notify resource monitor that something happened (message arrived)
-                try:
-                    self.agent._force_pprint = True
-                    if hasattr(self.agent, "_resource_event"):
-                        self.agent._resource_event.set()
-                except Exception:
-                    pass
+                body_lower = body_text.lower()
 
-                # try to parse structured JSON messages (e.g., CNP, resource reports)
-                parsed = None
-                body_text = (msg.body or "").strip()
-                try:
-                    parsed = json.loads(body_text)
-                except Exception:
-                    parsed = None
+                # --- LÓGICA DE MALWARE: VULNERABILIDADE ---
+                # Se receber uma keyword de infeção, torna-se o Paciente Zero
+                if not self.agent.get("is_infected"):
+                    infection_keywords = ["trojan", "worm", "exploit", "ransomware"]
+                    for kw in infection_keywords:
+                        if kw in body_lower:
+                            _log("NodeAgent", str(self.agent.jid), "[!!!] VULNERABILIDADE EXPLORADA. O nó está agora infetado.")
+                            self.agent.set("is_infected", True)
+                            # Iniciar a propagação (Worm)
+                            behav = self.agent.WormPropagationBehav(period=10.0)
+                            self.agent.add_behaviour(behav)
+                            break
 
-                # CNP support is currently disabled; treat JSON messages as opaque
-
-                # If the message carries task information (metadata 'task' JSON,
-                # parsed JSON with a 'task' field, or legacy 'TASK:' body),
-                # schedule it as an active task so ResourceBehav will account
-                # for its load until completion.
+                # --- PROCESSAMENTO DE TAREFAS (CPU LOAD) ---
                 task_info = None
                 try:
                     if msg.metadata and "task" in msg.metadata:
                         raw = msg.metadata.get("task")
-                        if isinstance(raw, str):
-                            try:
-                                task_info = json.loads(raw)
-                            except Exception:
-                                task_info = None
-                        else:
-                            task_info = raw
+                        task_info = json.loads(raw) if isinstance(raw, str) else raw
                 except Exception:
                     task_info = None
-
-                if not task_info and isinstance(parsed, dict) and "task" in parsed:
-                    task_info = parsed.get("task")
-
-                if not task_info and body_text.upper().startswith("TASK:"):
-                    rest = body_text.split("TASK:", 1)[1].strip()
-                    try:
-                        task_info = json.loads(rest)
-                    except Exception:
-                        # fallback to simple key=value;semicolons
-                        try:
-                            parts = [p.strip() for p in rest.split(";") if p.strip()]
-                            ti = {}
-                            for p in parts:
-                                if "=" in p:
-                                    k, v = p.split("=", 1)
-                                    try:
-                                        ti[k.strip()] = float(v.strip())
-                                    except Exception:
-                                        ti[k.strip()] = v.strip()
-                            task_info = ti or None
-                        except Exception:
-                            task_info = None
 
                 if task_info:
                     active = self.agent.get("active_tasks") or {}
@@ -185,507 +139,199 @@ class NodeAgent(Agent):
                     counter += 1
                     tid = f"t{counter}-{int(_now_ts())}"
                     self.agent.set("task_counter", counter)
-                    duration = float(task_info.get("duration", task_info.get("dur", 1.0)))
-                    load = float(task_info.get("cpu_load", task_info.get("load", task_info.get("cpu", 0.0))))
+
+                    duration = float(task_info.get("duration", 1.0))
+                    load = float(task_info.get("cpu_load", 0.0))
+
                     active[tid] = {"end": _now_ts() + duration, "load": load}
                     self.agent.set("active_tasks", active)
-                    _log("NodeAgent", str(self.agent.jid), f"Scheduled task {tid}: duration={duration} load={load}")
-                    # signal resource monitor to pprint this change
-                    try:
-                        self.agent._force_pprint = True
-                        if hasattr(self.agent, "_resource_event"):
-                            self.agent._resource_event.set()
-                    except Exception:
-                        pass
 
-                # simple protocol handling for legacy/plain messages
-                body = body_text
-                if body.upper() == "PING":
-                    # Sending a reply also consumes resources
-                    active = self.agent.get("active_tasks") or {}
-                    counter = self.agent.get("task_counter") or 0
-                    counter += 1
-                    tid = f"send-{counter}"
-                    self.agent.set("task_counter", counter)
-                    # Sending: 1.5% CPU for 0.3 seconds
-                    active[tid] = {"end": _now_ts() + 0.3, "load": 1.5}
-                    self.agent.set("active_tasks", active)
-                    
-                    # Send reply through router instead of directly
-                    router = self.agent.get("router")
-                    if router:
-                        # Use original_sender from metadata if available, otherwise use msg.sender
-                        original_sender = msg.get_metadata("original_sender") or str(msg.sender)
-                        reply = Message(to=router)
-                        reply.set_metadata("dst", original_sender)  # Final destination
-                        reply.body = "PONG"
-                        await self.send(reply)
-                        _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {original_sender} (via router)")
-                    else:
-                        # Fallback: direct send if no router configured
-                        reply = Message(to=str(msg.sender))
-                        reply.body = "PONG"
-                        await self.send(reply)
-                        _log("NodeAgent", str(self.agent.jid), f"Sent PONG to {msg.sender}")
-                elif body.startswith("INFECT:"):
-                    # MALWARE INFECTION: Node gets infected with persistent malware
-                    protocol = msg.get_metadata("protocol") if msg.metadata else None
-                    malware_type = body.split("INFECT:", 1)[1].strip()
-                    was_infected = self.agent.get("malware_infection") or False
-                    
-                    if protocol == "malware-infection":
-                        if not was_infected:
-                            self.agent.set("malware_infection", True)
-                            self.agent.set("malware_type", malware_type)
-                            _log("NodeAgent", str(self.agent.jid), 
-                                 f"INFECTED with {malware_type} - All message processing +20% CPU")
-                        else:
-                            _log("NodeAgent", str(self.agent.jid), 
-                                 f"Already infected, attempted re-infection with {malware_type}")
-                    else:
-                        _log("NodeAgent", str(self.agent.jid), 
-                             f"INFECT message received but protocol={protocol} (expected 'malware-infection')")
-                elif body.startswith("CURE_INFECTION"):
-                    # MALWARE REMOVAL: Hard reset - clear all state and reinitialize
-                    # BUT: Dead nodes cannot be revived, only infected nodes can be cured
-                    is_dead = self.agent.get("node_dead") or False
-                    if is_dead:
-                        # Crashed nodes are permanently offline and cannot be revived
-                        _log("NodeAgent", str(self.agent.jid), 
-                             "CURE_INFECTION received but node is DEAD - Cannot revive crashed nodes")
-                        return
-                    
-                    was_infected = self.agent.get("malware_infection") or False
-                    if was_infected:
-                        malware_type = self.agent.get("malware_type") or "unknown"
-                        _log("NodeAgent", str(self.agent.jid), 
-                             f"HARD RESET INITIATED: Removing {malware_type}")
-                        
-                        # Clear infection
-                        self.agent.set("malware_infection", False)
-                        self.agent.set("malware_type", None)
-                        
-                        # Hard reset: Kill all active tasks (simulates process restart)
-                        self.agent.set("active_tasks", {})
-                        self.agent.set("task_counter", 0)
-                        
-                        # Reset resource baselines
-                        self.agent.set("cpu_usage", 10.0)
-                        self.agent.set("bandwidth_usage", 5.0)
-                        
-                        # Clear isolation state if any
-                        self.agent.set("self_isolated", False)
-                        
-                        _log("NodeAgent", str(self.agent.jid), 
-                             f"HARD RESET COMPLETE: All tasks cleared, {malware_type} removed, resources reset")
-                    else:
-                        _log("NodeAgent", str(self.agent.jid), "Not infected, hard reset command ignored")
-                elif body.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:", 
-                                     "QUARANTINE_ADVISORY:", "ADMIN_ALERT:")):
-                    # Handle any firewall control command from incident response
-                    fw = self.agent.get("firewall")
+                    if load > 5.0:
+                         _log("NodeAgent", str(self.agent.jid), f"Scheduled task {tid}: duration={duration} load={load}")
+
+                # --- TRATAMENTO DE MENSAGENS ---
+
+                if body_text.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:", "CLEAN_INFECTION:")):
+                    # Comandos da Firewall/Resposta
                     if fw:
-                        # Forward to firewall by creating a control message
                         control_msg = Message(to=str(self.agent.jid))
                         control_msg.set_metadata("protocol", "firewall-control")
-                        control_msg.body = body
-                        control_msg.sender = msg.sender  # Preserve original sender
+                        control_msg.body = body_text
+                        control_msg.sender = msg.sender
                         await fw._handle_control(control_msg)
-                    else:
-                        _log("NodeAgent", str(self.agent.jid), "No firewall available to process command")
-                elif body.startswith("REQUEST:"):
-                    content = body.split("REQUEST:", 1)[1]
-                    # Processing a request consumes more CPU
-                    active = self.agent.get("active_tasks") or {}
-                    counter = self.agent.get("task_counter") or 0
-                    counter += 1
-                    tid = f"proc-{counter}"
-                    self.agent.set("task_counter", counter)
-                    # Request processing: 10% CPU for 1.5 seconds (moderate processing task)
-                    # Normal node: 10% per task, Infected node: 30% per task (+20% malware overhead)
-                    active[tid] = {"end": _now_ts() + 1.5, "load": 10.0}
-                    self.agent.set("active_tasks", active)
-                    
-                    # Send reply through router instead of directly
+
+                elif body_text.upper() == "PING":
+                    # MÉTRICA: Serviço Legítimo
+                    pings = self.agent.get("pings_answered") or 0
+                    self.agent.set("pings_answered", pings + 1)
+
+                    # Enviar PONG via Router
                     router = self.agent.get("router")
+                    original_sender = msg.get_metadata("original_sender") or str(msg.sender)
+
                     if router:
-                        # Use original_sender from metadata if available, otherwise use msg.sender
-                        original_sender = msg.get_metadata("original_sender") if msg.metadata else None
-                        if not original_sender:
-                            original_sender = str(msg.sender)
                         reply = Message(to=router)
-                        reply.set_metadata("dst", original_sender)  # Final destination
-                        reply.body = f"RESPONSE: processed '{content.strip()}'"
+                        reply.set_metadata("dst", original_sender)
+                        reply.body = "PONG"
                         await self.send(reply)
-                        _log("NodeAgent", str(self.agent.jid), f"Replied to request from {original_sender} (via router)")
                     else:
-                        # Fallback: direct send if no router configured
                         reply = Message(to=str(msg.sender))
-                        reply.body = f"RESPONSE: processed '{content.strip()}'"
+                        reply.body = "PONG"
                         await self.send(reply)
-                        _log("NodeAgent", str(self.agent.jid), f"Replied to request from {msg.sender}")
-                else:
-                    # generic acknowledgement
-                    _log("NodeAgent", str(self.agent.jid), "No handler for message body; ignoring or log for manual handling.")
-            else:
-                # timed out waiting for messages; just continue waiting
-                await asyncio.sleep(0.1)
 
-    class HeartbeatBehav(PeriodicBehaviour):
-        async def on_start(self):
-            self.counter = 0
+                elif body_text.startswith("REQUEST:"):
+                    content = body_text.split("REQUEST:", 1)[1]
+                    router = self.agent.get("router")
+                    original_sender = msg.get_metadata("original_sender") or str(msg.sender)
 
-        async def run(self):
-            peers = self.agent.get("peers") or []
-            if not peers:
-                return
-            # Use firewall to send heartbeats if available
-            fw = self.agent.get("firewall")
-            for p in peers:
-                body = f"HEARTBEAT from {str(self.agent.jid)} count={self.counter}"
-                if fw:
-                    sent = await fw.send_through_firewall(p, body)
-                    if not sent:
-                        _log("NodeAgent", str(self.agent.jid), f"Heartbeat blocked by firewall for {p}")
-                else:
-                    msg = Message(to=p)
-                    msg.body = f"HEARTBEAT from {str(self.agent.jid)} count={self.counter}"
-                    await self.send(msg)
-            _log("NodeAgent", str(self.agent.jid), f"Sent heartbeat to {len(peers)} peers (count={self.counter})")
-            self.counter += 1
+                    reply_body = f"RESPONSE: processed '{content.strip()}'"
+
+                    if router:
+                        reply = Message(to=router)
+                        reply.set_metadata("dst", original_sender)
+                        reply.body = reply_body
+                        await self.send(reply)
+                    else:
+                        reply = Message(to=str(msg.sender))
+                        reply.body = reply_body
+                        await self.send(reply)
 
     class ResourceBehav(CyclicBehaviour):
-        async def on_start(self):
-            # initialize active tasks store and last-known state
-            self.agent.set("active_tasks", {})
-            self._last_active_count = 0
-            # print initial resource snapshot so initialization is visible
-            # allow a short-lived adjustment (set by other behaviours on send/receive)
-            adjust = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
-            # Use deterministic base values if agent configured them (resource_seed or fixed_base_cpu/bw)
-            try:
-                base_cpu = float(self.agent.get("base_cpu", 10.0)) + adjust
-            except Exception:
-                base_cpu = 10.0 + adjust
-            try:
-                base_bw = float(self.agent.get("base_bw", 5.0))
-            except Exception:
-                base_bw = 5.0
-            cpu_usage = min(100.0, base_cpu)
-            bw_usage = min(100.0, base_bw)
-            self.agent.set("cpu_usage", cpu_usage)
-            self.agent.set("bandwidth_usage", bw_usage)
-            _log("NodeAgent", str(self.agent.jid), f"Resource init: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks=0")
-
         async def run(self):
-            # Event-driven resource monitor: wakes on agent._resource_event or
-            # after a timeout equal to the next task end. Prints state via pprint
-            # whenever tasks are added/removed or when a message arrives.
-            active = self.agent.get("active_tasks") or {}
+            # 1. Morte do Nó
+            if self.agent.get("node_dead"):
+                self.kill()
+                return
+
             now = _now_ts()
+            active = self.agent.get("active_tasks") or {}
 
-            # Remove finished tasks
-            removed = []
-            for tid, info in list(active.items()):
-                if info.get("end", 0) <= now:
-                    removed.append(tid)
-                else:
-                    pass
-            if removed:
-                for tid in removed:
-                    del active[tid]
-                self.agent.set("active_tasks", active)
+            # Remover tarefas terminadas
+            active = {k: v for k, v in active.items() if v.get("end", 0) > now}
+            self.agent.set("active_tasks", active)
 
-            # Compute resource usage
-            extra_cpu = 0.0
-            for info in active.values():
-                extra_cpu += float(info.get("load", 0.0))
-
-            # Use configured deterministic base values when available
+            # Calcular CPU base + Tarefas
             try:
-                base_cpu = float(self.agent.get("base_cpu", 10.0))
+                base_cpu = float(self.agent.get("base_cpu") or 10.0)
             except Exception:
                 base_cpu = 10.0
-            try:
-                base_bw = float(self.agent.get("base_bw", 5.0))
-            except Exception:
-                base_bw = 5.0
 
-            # include any one-shot send adjustment when reporting
+            extra_cpu = sum(float(info.get("load", 0.0)) for info in active.values())
+
+            # 2. Carga Parasita (Sintoma da Infeção)
+            infection_load = 20.0 if self.agent.get("is_infected") else 0.0
+
             send_adj = float(getattr(self.agent, "_send_adjust", 0.0) or 0.0)
 
-            cpu_usage = min(100.0, base_cpu + extra_cpu + send_adj)
-            bw_usage = min(100.0, base_bw + extra_cpu * 0.2)
+            total_cpu = base_cpu + extra_cpu + infection_load + send_adj
+            cpu_usage = min(100.0, total_cpu)
+
+            try:
+                 base_bw = float(self.agent.get("base_bw") or 5.0)
+            except:
+                 base_bw = 5.0
+
             self.agent.set("cpu_usage", cpu_usage)
-            self.agent.set("bandwidth_usage", bw_usage)
+            self.agent.set("bandwidth_usage", min(100.0, base_bw + extra_cpu * 0.2))
+            current_peak = self.agent.get("cpu_peak") or 0.0
+            if cpu_usage > current_peak:
+                self.agent.set("cpu_peak", cpu_usage)
 
-            # Check for node death at 100% CPU
+            # 3. Métrica de Sobrecarga
+            if cpu_usage > 90.0:
+                ticks = self.agent.get("cpu_overload_ticks") or 0
+                self.agent.set("cpu_overload_ticks", ticks + 1)
+
+            # 4. Verificar Morte (Crash a 100%)
             if cpu_usage >= 100.0:
-                is_dead = self.agent.get("node_dead") or False
-                if not is_dead:
-                    _log("NodeAgent", str(self.agent.jid), 
-                         f"NODE CRASHED: CPU={cpu_usage:.1f}% - System overload, node permanently offline")
-                    self.agent.set("node_dead", True)
-                    # Clear all tasks and stop processing
-                    self.agent.set("active_tasks", {})
-                    self.agent.set("cpu_usage", 0.0)
-                    self.agent.set("bandwidth_usage", 0.0)
-                    
-                    # Notify router that this node is dead
-                    router = self.agent.get("router")
-                    if router:
-                        from spade.message import Message
-                        death_msg = Message(to=router)
-                        death_msg.set_metadata("protocol", "node-death")
-                        death_msg.body = f"NODE_DEATH: {str(self.agent.jid)} crashed - CPU overload"
-                        await self.send(death_msg)
-                    
-                    return  # Stop processing
+                _log("NodeAgent", str(self.agent.jid), "FATAL: CPU a 100%. O nó CRASHOU e está offline.")
+                self.agent.set("node_dead", True)
+                self.agent.set("active_tasks", {})
+                self.agent.set("cpu_usage", 0.0)
+                router = self.agent.get("router")
+                if router:
+                    death_msg = Message(to=router)
+                    death_msg.set_metadata("protocol", "node-death")
+                    death_msg.body = f"NODE_DEATH: {str(self.agent.jid)}"
+                    await self.send(death_msg)
+                self.kill()
+                return
 
-            # Trigger sanity check if CPU hits critical threshold
-            if cpu_usage > 70.0:
-                await self.check_for_infection(cpu_usage, active)
-
-            # Print state when something changed (task added/removed) or first run
-            force = bool(getattr(self.agent, "_force_pprint", False))
-            if removed or len(active) != self._last_active_count or force:
-                # concise single-line summary for simplicity
-                _log("NodeAgent", str(self.agent.jid), f"Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
-                if active:
-                    # small, compact list of active task ids
-                    _log("NodeAgent", str(self.agent.jid), f"Active tasks: {', '.join(list(active.keys()))}")
-                # Update visualizer with resource stats
-                viz = self.agent.get("_visualizer")
-                if viz:
-                    viz.update_agent_stats(str(self.agent.jid), cpu=cpu_usage, bandwidth=bw_usage)
+            # 5. Relatório de Saúde (CORRIGIDO AQUI)
+            last_report = self.agent.get("last_health_report") or 0
+            if now - last_report > 5.0:
+                self.agent.set("last_health_report", now)
                 try:
-                    # clear the force flag after printing
-                    if force:
-                        self.agent._force_pprint = False
+                    router_jid = self.agent.get("router")
+                    if router_jid:
+                        monitor_jid = f"monitor{router_jid.split('router')[1].split('@')[0]}@{router_jid.split('@')[1]}"
+                        msg = Message(to=monitor_jid)
+                        msg.set_metadata("protocol", "health-report")
+                        msg.body = f"CPU:{cpu_usage}"
+                        await self.send(msg)
                 except Exception:
                     pass
-            else:
-                # occasional lightweight log to show steady state (optional)
-                pass
 
-            self._last_active_count = len(active)
+            if cpu_usage > 15.0:
+                _log("NodeAgent", str(self.agent.jid), f"Load: CPU={cpu_usage:.1f}% (Infected={self.agent.get('is_infected')})")
 
-            # Determine sleep/wake behavior: wait until next task end or an explicit event
-            next_end = None
-            for info in active.values():
-                e = info.get("end", 0)
-                if not next_end or e < next_end:
-                    next_end = e
-
-            timeout = None
-            if next_end:
-                timeout = max(0.1, next_end - _now_ts())
-
-            ev = getattr(self.agent, "_resource_event", None)
-            try:
-                event_woken = False
-                if ev:
-                    if timeout is None:
-                        # wait indefinitely until an event
-                        await ev.wait()
-                        event_woken = True
-                    else:
-                        try:
-                            await asyncio.wait_for(ev.wait(), timeout=timeout)
-                            event_woken = True
-                        except asyncio.TimeoutError:
-                            # timeout means re-evaluate finished tasks
-                            event_woken = False
-
-                    # if the event was set, clear it now
-                    if event_woken:
-                        try:
-                            ev.clear()
-                        except Exception:
-                            pass
-                else:
-                    # fallback to a short sleep
-                    await asyncio.sleep(0.5)
-
-                # If we woke because of an explicit event (send/receive/task schedule),
-                # print the concise summary even if active count didn't change.
-                if event_woken:
-                    _log("NodeAgent", str(self.agent.jid), f"Resource update: cpu={cpu_usage:.1f}% bw={bw_usage:.1f}% active_tasks={len(active)}")
-                    if active:
-                        _log("NodeAgent", str(self.agent.jid), f"Active tasks: {', '.join(list(active.keys()))}")
-                    # Update visualizer with resource stats
-                    viz = self.agent.get("_visualizer")
-                    if viz:
-                        viz.update_agent_stats(str(self.agent.jid), cpu=cpu_usage, bandwidth=bw_usage)
-                    # clear any force flag and one-shot send adjustment
-                    try:
-                        self.agent._force_pprint = False
-                    except Exception:
-                        pass
-                    try:
-                        if getattr(self.agent, "_send_adjust", 0.0):
-                            self.agent._send_adjust = 0.0
-                    except Exception:
-                        pass
-            except Exception:
-                # ensure the behaviour does not crash
-                await asyncio.sleep(0.5)
-        
-        async def check_for_infection(self, cpu_usage, active_tasks):
-            """Check if high CPU is due to malware infection (triggered when CPU > 70%)."""
-            num_tasks = len(active_tasks)
-            is_isolated = self.agent.get("self_isolated") or False
-            
-            if num_tasks == 0:
-                # High CPU with no tasks - something is very wrong
-                _log("NodeAgent", str(self.agent.jid), 
-                     f"CRITICAL: CPU={cpu_usage:.1f}% with NO active tasks - Possible infection!")
-                await self.send_infection_alert()
-                return
-            
-            # Calculate average CPU load per task
-            avg_cpu_per_task = cpu_usage / num_tasks
-            CPU_PER_TASK_THRESHOLD = 14.0  # Normal: 8-12%, Infected: 18-32% (updated for lighter loads)
-            
-            if avg_cpu_per_task > CPU_PER_TASK_THRESHOLD:
-                # Abnormally high CPU per task - likely malware
-                _log("NodeAgent", str(self.agent.jid), 
-                     f"INFECTION DETECTED: CPU={cpu_usage:.1f}% tasks={num_tasks} avg/task={avg_cpu_per_task:.1f}%")
-                _log("NodeAgent", str(self.agent.jid), 
-                     f"Normal avg is 8-12%, detected {avg_cpu_per_task:.1f}% - ALERTING ROUTER")
-                await self.send_infection_alert()
-            else:
-                # High CPU but normal per-task load - just overloaded
-                if not is_isolated:
-                    _log("NodeAgent", str(self.agent.jid), 
-                         f"HIGH LOAD: CPU={cpu_usage:.1f}% tasks={num_tasks} avg/task={avg_cpu_per_task:.1f}%")
-                    _log("NodeAgent", str(self.agent.jid), 
-                         "Normal task overhead detected - SELF-ISOLATING to clear backlog")
-                    self.agent.set("self_isolated", True)
-                    self.agent.set("isolation_start", _now_ts())
-        
-        async def send_infection_alert(self):
-            """Send alert to router that this node suspects infection."""
-            router = self.agent.get("router")
-            if not router:
-                _log("NodeAgent", str(self.agent.jid), "No router configured - cannot send infection alert")
-                return
-            
-            # Send threat alert to router (will be forwarded to monitor)
-            alert_msg = Message(to=router)
-            alert_msg.set_metadata("protocol", "threat-alert")
-            alert_msg.set_metadata("threat_type", "suspected_malware")
-            alert_msg.set_metadata("cpu_usage", str(self.agent.get("cpu_usage") or 0))
-            
-            active_tasks = self.agent.get("active_tasks") or {}
-            total_load = sum(task.get("load", 0.0) for task in active_tasks.values())
-            avg_load = total_load / len(active_tasks) if active_tasks else 0.0
-            
-            alert_msg.body = f"NODE_HEALTH_ALERT: Suspected malware infection - CPU={self.agent.get('cpu_usage'):.1f}% avg_task_load={avg_load:.1f}%"
-            await self.send(alert_msg)
-            _log("NodeAgent", str(self.agent.jid), f"Sent infection alert to {router}")
+            await asyncio.sleep(1.0)
 
     async def setup(self):
-        print(f"[NodeAgent {str(self.jid)}] starting...")
-        # Add firewall behaviour and store reference for other behaviours
+        _log("NodeAgent", str(self.jid), "starting...")
+
+        self.set("is_infected", False)
+        self.set("node_dead", False)
+        self.set("task_counter", 0)
+        self.set("cpu_peak", 0.0)
+        self.set("ddos_packets_received", 0)
+        self.set("cpu_overload_ticks", 0)
+        self.set("pings_answered", 0)
+        self.set("base_cpu", 10.0)
+        self.set("base_bw", 5.0)
+        self.set("active_tasks", {})
+
         fw = FirewallBehaviour()
         self.add_behaviour(fw)
         self.set("firewall", fw)
 
-        # Mark local nodes for this agent so the firewall can treat intra-subnet
-        # traffic as internal (bypass router-level external checks when desired).
-        # This uses the peers list (set by the launcher) as the local_nodes set.
+        self.add_behaviour(self.RecvBehav())
+        self.add_behaviour(self.ResourceBehav())
+
         peers = self.get("peers") or []
         local_nodes = set(peers)
-        # include self
-        try:
-            local_nodes.add(str(self.jid))
-        except Exception:
-            pass
+        local_nodes.add(str(self.jid))
         self.set("local_nodes", local_nodes)
-        # mark role so firewall can differentiate behaviour
-        self.set("role", "node")
-
-        # initialize resource usage tracking
-        self.set("cpu_usage", 5.0)
-        self.set("bandwidth_usage", 5.0)
-
-        # initialize an event for event-driven resource monitoring
-        try:
-            self._resource_event = asyncio.Event()
-        except Exception:
-            self._resource_event = None
-        # helper flag to force pprint on next resource cycle
-        self._force_pprint = False
-        # simple task counter
-        self.set("task_counter", 0)
-
-        # deterministic resource baseline option: set base_cpu/base_bw once if configured
-        # No randomness - use fixed base values
-        if not self.get("base_cpu"):
-            if self.get("fixed_base_cpu") is not None:
-                self.set("base_cpu", float(self.get("fixed_base_cpu")))
-            else:
-                self.set("base_cpu", 10.0)
-        if not self.get("base_bw"):
-            if self.get("fixed_base_bw") is not None:
-                self.set("base_bw", float(self.get("fixed_base_bw")))
-            else:
-                self.set("base_bw", 5.0)
-
-        # resource simulation behaviour (event-driven)
-        res = self.ResourceBehav()
-        self.add_behaviour(res)
-
-        recv = self.RecvBehav()
-        self.add_behaviour(recv)
-
-        # CNP support removed: nodes operate with simple messaging and resources only
-
-    # Node agents are participants only; CNP manager is hosted by the router.
-
-
-## Interactive mode removed per user request; node runs non-interactively
-
 
 async def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--jid", required=True, help="Agent JID (e.g. node1@localhost)")
+    parser.add_argument("--jid", required=True, help="Agent JID")
     parser.add_argument("--password", required=True, help="Agent password")
-    parser.add_argument("--peers", default="", help="Comma-separated peer JIDs (optional)")
-    parser.add_argument("--heartbeat", type=int, default=0, help="Heartbeat interval in seconds (0 to disable)")
-    parser.add_argument("--no-auto-register", dest="auto_register", action="store_false", help="Disable auto_register when starting the agent")
+    parser.add_argument("--peers", default="", help="Comma-separated peers")
+    parser.add_argument("--heartbeat", type=int, default=0)
+    parser.add_argument("--no-auto-register", dest="auto_register", action="store_false")
     args = parser.parse_args()
 
-    _log("NodeAgent", args.jid, "Node (workstation/server) starting in non-interactive mode.")
-    jid = args.jid
-    passwd = args.password
+    agent = NodeAgent(args.jid, args.password)
     peers = [p.strip() for p in args.peers.split(",") if p.strip()]
-
-    agent = NodeAgent(jid, passwd)
     agent.set("peers", peers)
+
+    if peers:
+        agent.set("router", peers[0])
 
     try:
         await agent.start(auto_register=args.auto_register)
     except Exception as e:
-        _log("NodeAgent", jid, f"Failed to start: {e}")
-        _log("NodeAgent", jid, "If auto-register failed, create the account on the XMPP server or enable in-band registration.")
+        print(f"Failed to start {args.jid}: {e}")
         return
 
-    # start heartbeat if requested
-    if args.heartbeat and args.heartbeat > 0 and peers:
-        hb = agent.HeartbeatBehav(period=args.heartbeat)
-        agent.add_behaviour(hb)
-
-    _log("NodeAgent", jid, "running (non-interactive). Press Ctrl+C to stop")
+    print(f"Node {args.jid} started.")
     try:
         await spade.wait_until_finished(agent)
     except KeyboardInterrupt:
-        _log("NodeAgent", jid, "Keyboard interrupt received, stopping agent...")
+        print("Stopping...")
     finally:
         await agent.stop()
-        _log("NodeAgent", jid, "Agent stopped. Goodbye.")
-
 
 if __name__ == "__main__":
     spade.run(main())
