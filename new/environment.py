@@ -61,7 +61,7 @@ NUM_RESPONSE_AGENTS = 1  # Number of incident response agents (for CNP)
 # Configuração para TESTE DE DDOS (Métricas)
 # Um ataque forte (intensidade 9) contra o router1_node0 começando ao segundo 5
 ATTACKERS = [
-    ("ddos", ["router1_node0@localhost"], 3, 30, 5)
+    ("ddos", ["router1_node0@localhost"], 9, 30, 5)
 ]
 
 # Outros exemplos (comentados):
@@ -138,7 +138,7 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
     return connections
 
 
-async def run_environment(domain: str, password: str, run_seconds: int = 40):
+async def run_environment(domain: str, password: str, run_seconds: int = 40, base_cpu: float = 10.0):
     """Create and run the full network environment."""
     _log("environment", f"Building network: {NUM_ROUTERS} routers, {NODES_PER_ROUTER} nodes/router, topology={ROUTER_TOPOLOGY}")
 
@@ -178,6 +178,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40):
         for n_idx in range(NODES_PER_ROUTER):
             node_jid = f"router{r_idx}_node{n_idx}@{domain}"
             node = NodeAgent(node_jid, password)
+            node.set("base_cpu", base_cpu)
             # Nodes send to their parent router
             parent_router_jid = f"router{r_idx}@{domain}"
             node.set("router", parent_router_jid)
@@ -424,7 +425,7 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40):
         _log("environment", f"Mitigação Real Efetiva: {last_mitigation.strftime('%H:%M:%S')}")
     _log("environment", "=" * 80)
 
-    save_metrics_to_csv("simulation_metrics.csv", ATTACKERS, stats)
+    save_metrics_to_csv("simulation_metrics_cpu.csv", ATTACKERS, stats, base_cpu)
 
     # Stop all agents
     _log("environment", "Stopping all agents...")
@@ -504,7 +505,7 @@ async def send_scheduled_messages(
     await asyncio.gather(*tasks)
 
 
-def save_metrics_to_csv(filename, attack_config, network_stats):
+def save_metrics_to_csv(filename, attack_config, network_stats, base_cpu):
     """
     Guarda as métricas de desempenho da simulação num ficheiro CSV.
     Mapeia diretamente os resultados para os 5 pontos exigidos no enunciado.
@@ -526,7 +527,8 @@ def save_metrics_to_csv(filename, attack_config, network_stats):
         'Metric6_Victim_Peak_CPU',  # O valor máximo de stress
         'Metric7_Victim_Crashed',  # Booleano explícito (TRUE/FALSE)
         'Raw_Overload_Cycles',  # Dados brutos de CPU
-        'Raw_Leakage_Count'  # Dados brutos de msgs
+        'Raw_Leakage_Count',  # Dados brutos de msgs
+        'Scenario_Base_CPU'
     ]
 
     with open(filename, mode='a', newline='') as f:
@@ -621,7 +623,8 @@ def save_metrics_to_csv(filename, attack_config, network_stats):
             'Metric6_Victim_Peak_CPU': f"{victim_peak:.1f}%",
             'Metric7_Victim_Crashed': "YES" if victim_died else "NO",
             'Raw_Overload_Cycles': overload,
-            'Raw_Leakage_Count': leakage
+            'Raw_Leakage_Count': leakage,
+            'Scenario_Base_CPU': base_cpu
         }
         writer.writerow(row)
         print(f"\n[METRICS] Dados guardados em {filename}")
@@ -631,12 +634,14 @@ def main():
     parser.add_argument("--domain", default="localhost", help="XMPP domain")
     parser.add_argument("--password", required=False, help="Password")
     parser.add_argument("--time", type=int, default=40, help="Seconds to run")
+    parser.add_argument("--base-cpu", type=float, default=10.0,
+                        help="Initial CPU load for nodes")
     args = parser.parse_args()
 
     passwd = args.password or os.environ.get("TEST_AGENT_PASSWORD") or "password"
 
     try:
-        spade.run(run_environment(args.domain, passwd, run_seconds=args.time))
+        spade.run(run_environment(args.domain, passwd, run_seconds=args.time, base_cpu=args.base_cpu))
     except KeyboardInterrupt:
         _log("environment", "Interrupted by user; exiting.")
 

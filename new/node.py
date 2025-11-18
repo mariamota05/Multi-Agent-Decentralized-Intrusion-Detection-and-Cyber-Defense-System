@@ -287,7 +287,7 @@ class NodeAgent(Agent):
         self.set("ddos_packets_received", 0)
         self.set("cpu_overload_ticks", 0)
         self.set("pings_answered", 0)
-        self.set("base_cpu", 10.0)
+        self.set("base_cpu", self.get("base_cpu") or 10.0)
         self.set("base_bw", 5.0)
         self.set("active_tasks", {})
 
