@@ -59,7 +59,7 @@ def plot_correlation(df):
 
 if __name__ == "__main__":
     try:
-        df = load_and_clean_data('simulation_metrics_cpu.csv')
+        df = load_and_clean_data('../simulation_metrics_cpu.csv')
         plot_correlation(df)
     except FileNotFoundError:
         print("Erro: Ficheiro 'simulation_metrics.csv' não encontrado.")

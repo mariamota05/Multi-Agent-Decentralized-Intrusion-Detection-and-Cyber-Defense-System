@@ -58,20 +58,20 @@ class DDoSAttacker(Agent):
         async def run(self):
             targets = self.agent.get("targets") or []
             intensity = int(self.agent.get("intensity") or 5)
-            
+
             if not targets or self.burst_count >= self.max_bursts:
                 if self.burst_count >= self.max_bursts:
                     _log(f"Completed {self.max_bursts} bursts - attack finished")
                     self.kill()
                 return
-            
+
             # Calculate burst size based on intensity
             burst_size = intensity * 10
             _log(f"BURST #{self.burst_count + 1}/{self.max_bursts} - Sending {burst_size} messages...")
-            
+
             # Round-robin through targets
             target_index = self.agent.get("target_index") or 0
-            
+
             for i in range(burst_size):
                 target_node_jid = targets[target_index % len(targets)]
                 target_index += 1
@@ -99,23 +99,23 @@ class DDoSAttacker(Agent):
 
                 await self.send(msg)
                 await asyncio.sleep(0.01)
-            
+
             self.agent.set("target_index", target_index % len(targets))
-            
+
             self.burst_count += 1
             _log(f"[+] Burst #{self.burst_count} complete ({burst_size} messages sent)")
-            
+
             if self.burst_count < self.max_bursts:
                 _log(f"Waiting 5 seconds before next burst...")
                 await asyncio.sleep(5.0)
 
     async def setup(self):
         _log(f"DDoS attacker initialized: {self.jid}")
-        
+
         # Start DDoS behavior
         behav = self.DDoSBehaviour()
         self.add_behaviour(behav)
-        
+
         intensity = int(self.get("intensity") or 5)
         burst_size = intensity * 10
         total_messages = burst_size * 3

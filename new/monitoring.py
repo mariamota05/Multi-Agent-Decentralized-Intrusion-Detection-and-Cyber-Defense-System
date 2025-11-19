@@ -163,7 +163,7 @@ class MonitoringAgent(Agent):
                 "malware", "virus", "exploit", "trojan", "worm", "ransomware",
             ]
             self.low_priority_keywords = [
-                "failed login", "failed_login", "unauthorized", 
+                "failed login", "failed_login", "unauthorized",
                 "exfiltration", "data_exfiltration", "backdoor", "lateral",
             ]
 
@@ -308,23 +308,32 @@ class MonitoringAgent(Agent):
             if suspicious:
                 # Probabilistic detection - sophisticated attackers may evade detection
                 import random
-                
+
                 # Extract attacker intensity to adjust detection probability
                 attacker_intensity = msg.get_metadata("attacker_intensity")
                 intensity_value = int(attacker_intensity) if attacker_intensity else 5
-                
+
                 # Calculate detection probability based on threat indicators AND attacker skill
                 # More reasons = higher detection, higher intensity = lower detection
                 base_detection_rate = 60  # Base 60% chance
                 detection_bonus = len(reasons) * 15  # +15% per reason
                 intensity_penalty = intensity_value * 5  # -5% per intensity level
                 detection_rate = min(95, max(20, base_detection_rate + detection_bonus - intensity_penalty))
-                
-                if random.randint(1, 100) > detection_rate:
+
+                if detection_rate >= 40:
+                    detected = True
+                else:
+                    bit = random.randint(0, 1)
+                    if bit == 0:
+                        detected = False
+                    else:
+                        detected = True
+
+                if not detected:
                     _log("MonitoringAgent", str(self.agent.jid),
                          f"[DETECTION EVADED] Sophisticated attacker evaded detection - {sender} (intensity={intensity_value}, detection rate: {detection_rate}%)")
                     return  # Attack not detected this time
-                
+
                 if sender not in self.alerted_senders:
                     self.alerted_senders[sender] = now + 15.0
                 else:
@@ -347,9 +356,16 @@ class MonitoringAgent(Agent):
                 threat_type = "unknown"
                 proto = msg.get_metadata("protocol")
                 if proto == "malware-infection": threat_type = "malware"
-                elif any(r.startswith("rate:") for r in reasons): threat_type = "ddos"
-                elif any(r.startswith("keyword_rate:") for r in reasons): threat_type = "insider_threat"
-                elif any(r.startswith("high_priority_keyword:") for r in reasons): threat_type = "malware"
+                for r in reasons:
+                    if r.startswith("rate:"): threat_type = "ddos"
+                    elif r.startswith("keyword_rate:"):
+                        if "login" in r or "unauthorized" in r:
+                            threat_type = "insider_threat_login"
+                        if "exfiltration" in r:
+                            threat_type = "insider_threat_exfiltration"
+                        if "backdoor" in r or "lateral" in r:
+                            threat_type = "insider_threat_backdoor"
+                    elif r.startswith("high_priority_keyword:"): threat_type = "malware"
 
                 response_jids = self.agent.get("response_jids") or []
                 if response_jids:
@@ -383,7 +399,7 @@ class MonitoringAgent(Agent):
                         # Extract offender and victim from metadata (node self-detection)
                         offender_jid = msg.get_metadata("offender") or "unknown"
                         victim_jid = msg.get_metadata("dst") or "unknown"
-                        
+
                         # If metadata extraction failed, try parsing body (firewall alerts)
                         if offender_jid == "unknown" or victim_jid == "unknown":
                             parts = msg.body.split(":", 1)
@@ -394,7 +410,7 @@ class MonitoringAgent(Agent):
                                     from_part = header.split("from ")[1]
                                     offender_match = from_part.split(" to ")[0].strip()
                                     victim_match = from_part.split(" to ")[1].strip()
-                                    
+
                                     if offender_jid == "unknown":
                                         offender_jid = offender_match
                                     if victim_jid == "unknown":
@@ -403,7 +419,9 @@ class MonitoringAgent(Agent):
                         alert_body = msg.body.lower()
                         threat_type = "malware"
                         for kw in self.low_priority_keywords:
-                            if kw in alert_body: threat_type = "insider_threat"; break
+                            if kw in alert_body:
+                                threat_type = "insider_threat_" + str(kw)
+                                break
 
                         alert = {
                             "time": datetime.datetime.now().isoformat(),

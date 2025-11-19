@@ -138,6 +138,6 @@ def plot_alternative_graphs(df):
 
 # Executar
 if __name__ == "__main__":
-    df = load_and_clean_data('simulation_metrics_cpu.csv')
+    df = load_and_clean_data('../simulation_metrics_cpu.csv')
     if df is not None:
         plot_alternative_graphs(df)

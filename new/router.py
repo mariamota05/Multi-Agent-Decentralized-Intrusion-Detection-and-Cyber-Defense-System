@@ -216,14 +216,14 @@ class RouterAgent(Agent):
             # Check if this is a threat alert from a node firewall
             if protocol == "threat-alert":
                 _log("Router", str(self.agent.jid), f"Threat alert received: {msg.body}")
-                
+
                 # Forward to monitors
                 monitors = self.agent.get("monitor_jids") or []
                 for monitor_jid in monitors:
                     fwd = Message(to=monitor_jid)
                     fwd.set_metadata("protocol", "threat-alert")
                     fwd.body = msg.body
-                    
+
                     # Forward metadata needed for CNP auction
                     if msg.metadata:
                         if "offender" in msg.metadata:
@@ -232,7 +232,7 @@ class RouterAgent(Agent):
                             fwd.set_metadata("dst", msg.get_metadata("dst"))
                         if "threat_type" in msg.metadata:
                             fwd.set_metadata("threat_type", msg.get_metadata("threat_type"))
-                    
+
                     await self.send(fwd)
                     _log("Router", str(self.agent.jid), f"Forwarded threat alert to {monitor_jid}")
                 return
@@ -300,7 +300,7 @@ class RouterAgent(Agent):
                     "original_sender": original_sender,
                     "original_destination": dst
                 }
-                
+
                 # Preserve important attack metadata for monitoring
                 if msg.metadata:
                     for key in ["attacker_intensity", "task", "spread_intensity"]:

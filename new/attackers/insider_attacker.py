@@ -34,7 +34,7 @@ import asyncio
 import datetime
 import getpass
 import json
-
+import random
 import spade
 from spade.agent import Agent
 from spade.behaviour import PeriodicBehaviour
@@ -63,7 +63,7 @@ class InsiderAttacker(Agent):
             # Check if attacker was blocked
             if self.blocked:
                 return
-            
+
             targets = self.agent.get("targets") or []
             intensity = self.agent.get("intensity") or 6
 
@@ -80,23 +80,52 @@ class InsiderAttacker(Agent):
             except Exception:
                 _log(f"ERROR: Could not extract router JID from target {target}")
                 router_jid = target
-            
-            # Check for incoming messages (account suspension/blocking)
-            msg = await self.receive(timeout=0.1)
-            if msg:
+
+            # Check for ALL incoming messages (account suspension/blocking)
+            # Drain the inbox to prevent race conditions between phases
+            while True:
+                msg = await self.receive(timeout=0.1)  # Non-blocking check
+                if not msg:
+                    break  # No more messages in queue
+
                 body = msg.body.lower()
-                if "suspend" in body or "block" in body or "banned" in body:
+                if "suspend" in body or "block" in body or "ban" in body:
                     # High-intensity attackers (7+) may ignore bans (APT behavior)
                     # Low-intensity attackers always stop when caught
-                    if intensity < 7:
+                    if intensity <= 7:
                         _log(f"[!] ATTACK STOPPED: Account suspended/blocked - {msg.body}")
                         self.blocked = True
                         self.kill()
                         return
                     else:
-                        # APT: Acknowledge detection but continue with stealth techniques
-                        _log(f"[APT] Detected and banned, but continuing attack with evasion techniques - {msg.body}")
-                        # Continue attacking (simulates using alternate credentials/methods)
+                        if "repeated" in body:
+                            if "severe" in body: #3
+                                if intensity <= 9:
+                                    _log(f"[!] ATTACK STOPPED: Repeated bans - {msg.body}")
+                                    self.blocked = True
+                                    self.kill()
+                                    return
+                                else: #maximum intensity
+                                    bit = random.randint(0, 1)
+                                    if bit == 0:
+                                        _log(f"[!!!] HIGH-INTENSITY ATTACKER IGNORES BAN AGAIN: Continuing attack despite {msg.body}")
+                                    else:
+                                        _log(f"[!] ATTACK FINALLY STOPPED: Repeated bans - {msg.body}")
+                                        self.blocked = True
+                                        self.kill()
+                                        return
+
+                            else: #2
+                                if intensity >= 9:
+                                    _log(f"[!!] HIGH-INTENSITY ATTACKER IGNORES BAN: Continuing attack despite {msg.body}")
+                                else:
+                                    _log(f"[!] ATTACK STOPPED: Repeated bans - {msg.body}")
+                                    self.blocked = True
+                                    self.kill()
+                                    return
+                        else:
+                            #como é o primeiro ataque deixamos passar
+                            _log(f"Detected and banned, but continuing attack with evasion techniques, despite {msg.body}")
 
             # Phase escalation logic
             if self.attempt_count < 5:
@@ -104,7 +133,7 @@ class InsiderAttacker(Agent):
                 if self.phase != 1:
                     self.phase = 1
                     _log("Phase 1: Failed login attempts (probing)")
-                
+
                 msg = Message(to=router_jid)
                 msg.set_metadata("dst", target)
                 msg.set_metadata("protocol", "attack")
@@ -115,13 +144,13 @@ class InsiderAttacker(Agent):
                 msg.body = f"ATTACK: Failed login attempt for admin user (try #{self.attempt_count + 1}) on TARGET:{target}"
                 await self.send(msg)
                 phase = 1
-                
+
             elif self.attempt_count < 10:
                 # Phase 2: Data Exfiltration (REACTIVE - bandwidth overhead!)
                 if self.phase != 2:
                     self.phase = 2
                     _log(f"[!] Phase 2: DATA EXFILTRATION (intensity={intensity} -> +{intensity*5}% bandwidth)")
-                
+
                 msg = Message(to=router_jid)
                 msg.set_metadata("dst", target)
                 msg.set_metadata("protocol", "attack")
@@ -130,13 +159,13 @@ class InsiderAttacker(Agent):
                 msg.body = f"DATA_EXFILTRATION:sensitive_data (intensity={intensity}) TARGET:{target}"
                 await self.send(msg)
                 phase = 2
-                
+
             else:
                 # Phase 3: Backdoor Installation (REACTIVE - lateral movement!)
                 if self.phase != 3:
                     self.phase = 3
                     _log(f"[!!] Phase 3: BACKDOOR INSTALLATION (intensity={intensity} -> lateral spread enabled)")
-                
+
                 msg = Message(to=router_jid)
                 msg.set_metadata("dst", target)
                 msg.set_metadata("protocol", "attack")

@@ -9,8 +9,9 @@ import asyncio
 import datetime
 import getpass
 from collections import defaultdict
+from operator import truediv
 from typing import Dict, Any, List
-
+import random
 import spade
 from spade.agent import Agent
 from spade.behaviour import CyclicBehaviour, PeriodicBehaviour
@@ -107,7 +108,7 @@ class IncidentResponseAgent(Agent):
             }
             self.agent.set("active_incidents", incidents)
 
-            success = await self.execute_mitigation(incident_id, threat_type, offender_jid, victim_jid)
+            success = await self.execute_mitigation(incident_id, threat_type, offender_jid, victim_jid, intensity)
 
             incidents[incident_id]["status"] = "resolved" if success else "failed"
             incidents[incident_id]["end_time"] = datetime.datetime.now().isoformat()
@@ -122,7 +123,7 @@ class IncidentResponseAgent(Agent):
             await self.send(inform)
             _log("IncidentResponse", str(self.agent.jid), f"Sent INFORM for incident {incident_id}: {'SUCCESS' if success else 'FAILURE'}")
 
-        async def execute_mitigation(self, incident_id: str, threat_type: str, offender_jid: str, victim_jid: str = None) -> bool:
+        async def execute_mitigation(self, incident_id: str, threat_type: str, offender_jid: str, victim_jid: str = None, intensity: int =None) -> bool:
             if hasattr(self.agent, "mitigation_history"):
                 self.agent.mitigation_history.append(datetime.datetime.now())
 
@@ -130,8 +131,6 @@ class IncidentResponseAgent(Agent):
 
             _log("IncidentResponse", str(self.agent.jid),
                  f"Executing mitigation for {threat_type} from {offender_jid} on victim {victim_str}")
-
-            # CORREÇÃO: SAFEGUARD (Só bloquear atacantes externos)
             if "attacker" not in offender_jid:
                 _log("IncidentResponse", str(self.agent.jid),
                      f"SAFEGUARD: Ignored mitigation request for internal node {offender_jid}. Not an attacker.")
@@ -185,58 +184,36 @@ class IncidentResponseAgent(Agent):
                     await self.send(ctrl)
                 return True
 
-            elif threat_type == "insider_threat":
-                offender_log = self.agent.get("suspended_offenders_log")
-                offense_count = offender_log[offender_jid]
+            elif "insider_threat" in threat_type:
+                mitigation_success_rate = max(40, 95 - (intensity * 5))  # 90% at intensity=1
 
+                mitigate = False
                 if victim_str == "unknown":
                      _log("IncidentResponse", str(self.agent.jid), "MITIGAÇÃO (Insider): No target identified yet.")
                      return False
 
-                if offense_count > 0: # 2ª OFENSA -> Bloqueio Global
-                    _log("IncidentResponse", str(self.agent.jid),
-                         f"MITIGAÇÃO [ESCALADA]: 2ª ofensa ({offense_count+1}) de {offender_jid}. A aplicar bloqueio global.")
+                if "login" in threat_type or "unauthorized" in threat_type:
+                    if intensity < 7:
+                        mitigate = True
+                    else:
+                        mitigate = False
+                else:
+                    if "exfiltration" in threat_type:
+                        if intensity < 9:
+                            mitigate = True
+                        else:
+                            mitigate = False
+                    if "backdoor" in threat_type or "lateral" in threat_type:
+                        if intensity == 9:
+                            mitigate = True
+                        else:
+                            bit = random.randint(0, 1)
+                            if bit == 0:
+                                mitigate = False
+                            else:
+                                mitigate = True
 
-                    # Notify attacker of permanent ban
-                    ban_notice = Message(to=offender_jid)
-                    ban_notice.body = f"ACCOUNT_BANNED: Permanent ban due to repeated security violations"
-                    await self.send(ban_notice)
-
-                    # Global block and forensic clean on all nodes
-                    for node_jid in nodes_to_protect:
-                        # Block attacker globally
-                        ctrl = Message(to=node_jid)
-                        ctrl.set_metadata("protocol", "firewall-control")
-                        ctrl.body = f"BLOCK_JID:{offender_jid}"
-                        await self.send(ctrl)
-                        
-                        # Send forensic clean to remove any backdoors
-                        forensic_msg = Message(to=node_jid)
-                        forensic_msg.set_metadata("protocol", "incident-response")
-                        forensic_msg.body = "FORENSIC_CLEAN:insider_threat"
-                        await self.send(forensic_msg)
-
-                    offender_log[offender_jid] += 1
-                    self.agent.set("suspended_offenders_log", offender_log)
-                    return True
-
-                # 1ª OFENSA -> Suspensão Local + Forensic Clean
-                _log("IncidentResponse", str(self.agent.jid),
-                     f"MITIGAÇÃO [1ª OFENSA]: Insider threat - suspendendo {offender_jid} APENAS no alvo {victim_str}")
-
-                await asyncio.sleep(0.7)
-
-                # Probabilistic mitigation effectiveness
-                # High-skill attackers may evade initial suspension
-                import random
-                # Try to extract intensity from active incidents
-                incidents = self.agent.get("active_incidents") or {}
-                incident_data = incidents.get(incident_id, {})
-                intensity_meta = incident_data.get("intensity", 5)
-                
-                mitigation_success_rate = max(40, 95 - (intensity_meta * 5))  # 90% at intensity=1, 40% at intensity=11+
-                
-                if random.randint(1, 100) > mitigation_success_rate:
+                if not mitigate:
                     _log("IncidentResponse", str(self.agent.jid),
                          f"[MITIGATION EVADED] Attacker used techniques to bypass initial suspension ({mitigation_success_rate}% success rate)")
                     # Still send forensic clean, but suspension failed
@@ -244,33 +221,67 @@ class IncidentResponseAgent(Agent):
                     forensic_msg.set_metadata("protocol", "incident-response")
                     forensic_msg.body = "FORENSIC_CLEAN:insider_threat"
                     await self.send(forensic_msg)
-                    
-                    offender_log[offender_jid] += 1
-                    self.agent.set("suspended_offenders_log", offender_log)
                     return False  # Mitigation partially failed
 
-                # Suspend attacker account
-                ctrl = Message(to=victim_str)
-                ctrl.set_metadata("protocol", "firewall-control")
-                ctrl.body = f"SUSPEND_ACCESS:{offender_jid}"
-                await self.send(ctrl)
-                
-                # Notify attacker that they've been blocked (stops attack progression)
-                block_notice = Message(to=offender_jid)
-                block_notice.body = f"ACCOUNT_SUSPENDED: Your account has been suspended due to suspicious activity"
-                await self.send(block_notice)
-                
-                # Send forensic clean to victim node
-                forensic_msg = Message(to=victim_str)
-                forensic_msg.set_metadata("protocol", "incident-response")
-                forensic_msg.body = "FORENSIC_CLEAN:insider_threat"
-                await self.send(forensic_msg)
+                else:
+                    if "login" in threat_type or "unauthorized" in threat_type:
+                        # 1ª OFENSA -> Suspensão Local
+                        _log("IncidentResponse", str(self.agent.jid),
+                             f"MITIGATION [1]: Insider threat - suspending {offender_jid} access on victim {victim_str}")
 
-                _log("IncidentResponse", str(self.agent.jid), "Admin alert logged + Forensic clean sent.")
+                        # Suspend attacker account
+                        ctrl = Message(to=victim_str)
+                        ctrl.set_metadata("protocol", "firewall-control")
+                        ctrl.body = f"SUSPEND_ACCESS:{offender_jid}"
+                        await self.send(ctrl)
 
-                offender_log[offender_jid] += 1
-                self.agent.set("suspended_offenders_log", offender_log)
-                return True
+                        # Notify attacker that they've been blocked (stops attack progression)
+                        block_notice = Message(to=offender_jid)
+                        block_notice.body = f"ACCOUNT_SUSPENDED: Your account has been suspended due to suspicious activity"
+                        await self.send(block_notice)
+
+                        # Send forensic clean to victim node
+                        forensic_msg = Message(to=victim_str)
+                        forensic_msg.set_metadata("protocol", "incident-response")
+                        forensic_msg.body = "FORENSIC_CLEAN:insider_threat"
+                        await self.send(forensic_msg)
+
+                        _log("IncidentResponse", str(self.agent.jid), "Admin alert logged + Forensic clean sent.")
+                        return True
+
+                    else:
+                        if "exfiltration" in threat_type:
+                            _log("IncidentResponse", str(self.agent.jid),
+                                 f"MITIGATION [2]: Applying permanent ban.")
+
+                            # Notify attacker of permanent ban
+                            ban_notice = Message(to=offender_jid)
+                            ban_notice.body = f"ACCOUNT_BANNED: Permanent ban due to repeated security violations"
+                            await self.send(ban_notice)
+
+                        if "backdoor" in threat_type or "lateral" in threat_type:
+                            _log("IncidentResponse", str(self.agent.jid),
+                                 f"MITIGATION [3]:Applying permanent ban.")
+
+                            ban_notice = Message(to=offender_jid)
+                            ban_notice.body = f"ACCOUNT_BANNED: Permanent ban enforced due to repeated severe violations"
+                            await self.send(ban_notice)
+
+                        # Global block and forensic clean on all nodes
+                        for node_jid in nodes_to_protect:
+                            # Block attacker globally
+                            ctrl = Message(to=node_jid)
+                            ctrl.set_metadata("protocol", "firewall-control")
+                            ctrl.body = f"BLOCK_JID:{offender_jid}"
+                            await self.send(ctrl)
+
+                            # Send forensic clean to remove any backdoors
+                            forensic_msg = Message(to=node_jid)
+                            forensic_msg.set_metadata("protocol", "incident-response")
+                            forensic_msg.body = "FORENSIC_CLEAN:insider_threat"
+                            await self.send(forensic_msg)
+
+                        return True
 
             else:
                 return False

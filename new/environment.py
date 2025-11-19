@@ -65,11 +65,12 @@ NUM_RESPONSE_AGENTS = 1   # Number of incident response agents (CNP managers)
 
 # Attacker configuration
 # Format: (Type, Targets, Intensity, Duration, Start_Delay)
-ATTACKERS = [
-    ("stealth_malware", ["router1_node0@localhost"], 9, 30, 5), ("ddos", ["router1_node0@localhost"], 8, 30, 5)
-]
 
-# Other examples (commented out):
+ATTACKERS = [("insider_threat", ["router1_node0@localhost"], 10, 300, 5)]
+#ATTACKERS = [("stealth_malware", ["router1_node0@localhost"], 9, 30, 5), ("ddos", ["router1_node0@localhost"], 9, 30, 5)]
+
+
+# Other examples:
 # ATTACKERS = [("stealth_malware", ["router1_node0@localhost"], 9, 30, 5)]
 # ATTACKERS = [("ddos", ["router1_node0@localhost"], 8, 30, 5)]
 # ATTACKERS = [("stealth_malware", ["router1_node0@localhost"], 9, 30, 5), ("ddos", ["router1_node0@localhost"], 8, 30, 5)]
@@ -137,7 +138,7 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
     return connections
 
 
-async def run_environment(domain: str, password: str, run_seconds: int = 200, base_cpu: float = 10.0):
+async def run_environment(domain: str, password: str, run_seconds: int = 300, base_cpu: float = 10.0):
     """Create, configure, and run the full network simulation.
 
     This is the main entry point for the simulation logic.
