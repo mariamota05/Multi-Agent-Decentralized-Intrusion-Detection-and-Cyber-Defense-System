@@ -56,7 +56,7 @@ def _log(hint: str, msg: str) -> None:
 # Configuration Section
 # Network Topology
 NUM_ROUTERS = 5           # Total number of routers in the network
-NODES_PER_ROUTER = 2      # Number of nodes attached to each router
+NODES_PER_ROUTER = 3      # Number of nodes attached to each router
 ROUTER_TOPOLOGY = "ring"  # Options: "ring", "mesh", "star", "line"
 
 # Security Agents
@@ -66,12 +66,13 @@ NUM_RESPONSE_AGENTS = 1   # Number of incident response agents (CNP managers)
 # Attacker configuration
 # Format: (Type, Targets, Intensity, Duration, Start_Delay)
 ATTACKERS = [
-    ("stealth_malware", ["router1_node0@localhost"], 9, 30, 5),
-    ("ddos", ["router1_node0@localhost"], 8, 30, 5)
+    ("stealth_malware", ["router1_node0@localhost"], 9, 30, 5), ("ddos", ["router1_node0@localhost"], 8, 30, 5)
 ]
 
 # Other examples (commented out):
-# ATTACKERS = [("insider_threat", ["router1_node0@localhost"], 6, 40, 3)]
+# ATTACKERS = [("stealth_malware", ["router1_node0@localhost"], 9, 30, 5)]
+# ATTACKERS = [("ddos", ["router1_node0@localhost"], 8, 30, 5)]
+# ATTACKERS = [("stealth_malware", ["router1_node0@localhost"], 9, 30, 5), ("ddos", ["router1_node0@localhost"], 8, 30, 5)]
 # ATTACKERS = [("stealth_malware", ["router0_node0@localhost"], 4, 50, 2)]
 
 # Message scheduling configuration
@@ -136,7 +137,7 @@ def build_router_topology(num_routers: int, topology: str) -> Dict[int, List[int
     return connections
 
 
-async def run_environment(domain: str, password: str, run_seconds: int = 40, base_cpu: float = 10.0):
+async def run_environment(domain: str, password: str, run_seconds: int = 200, base_cpu: float = 10.0):
     """Create, configure, and run the full network simulation.
 
     This is the main entry point for the simulation logic.
@@ -206,6 +207,14 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
                 node_seed += 1
 
             nodes.append((r_idx, n_idx, node_jid, node))
+
+    # Populate subnet_peers for lateral movement (insider threat)
+    for r_idx, n_idx, node_jid, node in nodes:
+        subnet_peers = []
+        for peer_r_idx, peer_n_idx, peer_node_jid, _ in nodes:
+            if peer_r_idx == r_idx and peer_node_jid != node_jid:
+                subnet_peers.append(peer_node_jid)
+        node.set("subnet_peers", subnet_peers)
 
     # Configure routers: local nodes and inter-router routes
     for r_idx, router_jid, router in routers:
@@ -340,9 +349,16 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
         else:
             alive_nodes.append(node_jid)
             cpu = node.get("cpu_usage") or 0.0
+            bw = node.get("bandwidth_usage") or 0.0
             is_infected = node.get("is_infected") or False
-            status = "INFECTED" if is_infected else "HEALTHY"
-            _log("environment", f"[OK] {node_jid} - ALIVE ({status}, CPU={cpu:.1f}%)")
+            is_compromised = node.get("compromised") or False
+            if is_infected:
+                status = "INFECTED"
+            elif is_compromised:
+                status = "COMPROMISED"
+            else:
+                status = "HEALTHY"
+            _log("environment", f"[OK] {node_jid} - ALIVE ({status}, CPU={cpu:.1f}% BW={bw:.1f}%)")
 
     _log("environment", "-" * 80)
 
@@ -359,15 +375,22 @@ async def run_environment(domain: str, password: str, run_seconds: int = 40, bas
         overload_ticks = node.get("cpu_overload_ticks") or 0
         pings = node.get("pings_answered") or 0
         is_infected = node.get("is_infected")
+        is_compromised = node.get("compromised")
+        exfiltration_active = node.get("exfiltration_active")
+        exfiltration_bandwidth = node.get("exfiltration_bandwidth") or 0
 
         # Only show if there is relevant data
-        if leakage > 0 or overload_ticks > 0 or pings > 0 or is_infected:
+        if leakage > 0 or overload_ticks > 0 or pings > 0 or is_infected or is_compromised:
             total_leakage += leakage
             total_overload += overload_ticks
 
             print(f"\n  NÓ: {node_jid}")
             if is_infected:
                 print(f"  [!] STATUS: INFECTED por malware!")
+            if is_compromised:
+                print(f"  [!] STATUS: COMPROMISED por insider threat (backdoor installed)!")
+            if exfiltration_active:
+                print(f"  [!] DATA EXFILTRATION ACTIVE: +{exfiltration_bandwidth:.1f}% bandwidth overhead")
 
             if leakage > 0:
                 print(f"  -> Received Malicious Packets not blocked: {leakage}")

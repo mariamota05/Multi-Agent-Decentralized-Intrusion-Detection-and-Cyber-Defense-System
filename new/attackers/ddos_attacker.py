@@ -7,8 +7,8 @@ ATTACK TYPE: Distributed Denial of Service
 WHAT IT DOES:
   • Sends sudden bursts of messages to overwhelm targets
   • 3 bursts total with 5-second intervals between them
-  • Burst size: intensity × 10 messages
-  • CPU load: intensity × 3% for 2 seconds per message
+  • Burst size: intensity x 10 messages
+  • CPU load: intensity x 3% for 2 seconds per message
 
 WHY THIS RESPONSE?
   [+] Rate limiting first (10 msg/s) - proportionate response
@@ -119,7 +119,7 @@ class DDoSAttacker(Agent):
         intensity = int(self.get("intensity") or 5)
         burst_size = intensity * 10
         total_messages = burst_size * 3
-        _log(f"Attack plan: 3 bursts × {burst_size} messages = {total_messages} total")
+        _log(f"Attack plan: 3 bursts x {burst_size} messages = {total_messages} total")
 
 
 async def main():

@@ -9,7 +9,7 @@ WHAT IT DOES:
   • Phase 1: Failed login attempts (5 attempts)
   • Phase 2: Unauthorized access to sensitive data (5 attempts)
   • Phase 3: Persistent data exfiltration attempts
-  • CPU load: phase × 8% (8% → 16% → 24%) for 5 seconds
+  • CPU load: phase x 8% (8% -> 16% -> 24%) for 5 seconds
 
 WHY THIS RESPONSE?
   [+] Account suspension first - reversible soft block
@@ -56,10 +56,16 @@ class InsiderAttacker(Agent):
             _log(f"Starting insider threat attack from {self.agent.jid}")
             self.phase = 1
             self.attempt_count = 0
+            self.blocked = False  # Track if attacker was blocked
             _log("Phase 1: Attempting credential access...")
 
         async def run(self):
+            # Check if attacker was blocked
+            if self.blocked:
+                return
+            
             targets = self.agent.get("targets") or []
+            intensity = self.agent.get("intensity") or 6
 
             if not targets:
                 return
@@ -69,51 +75,78 @@ class InsiderAttacker(Agent):
             target = targets[target_index % len(targets)]
             self.agent.set("target_index", (target_index + 1) % len(targets))
 
-            # Escalate attack over time
-            if self.attempt_count < 5:
-                # Phase 1: Failed login attempts
-                if self.phase != 1:
-                    self.phase = 1
-                    _log("Phase 1: Failed login attempts")
-                # CORREÇÃO: Incluir o alvo no corpo da mensagem
-                msg_body = f"ATTACK: Failed login attempt for admin user (try #{self.attempt_count + 1}) on TARGET:{target}"
-                phase = 1
-            elif self.attempt_count < 10:
-                # Phase 2: Unauthorized access attempts
-                if self.phase != 2:
-                    self.phase = 2
-                    _log("[!] Phase 2: Escalating to unauthorized access attempts")
-                msg_body = f"ATTACK: Attempting unauthorized access to sensitive data on TARGET:{target}"
-                phase = 2
-            else:
-                # Phase 3: Persistent breach attempt
-                if self.phase != 3:
-                    self.phase = 3
-                    _log("[!!] Phase 3: Persistent data exfiltration attempts")
-                msg_body = f"ATTACK: Persistent unauthorized access attempt - trying data exfiltration on TARGET:{target}"
-                phase = 3
-
             try:
-                # Extrai o JID do router a partir do JID do nó
-                # (ex: "router1_node0@localhost" -> "router1" + "@" + "localhost")
                 router_jid = target.split('_')[0] + "@" + target.split('@')[1]
             except Exception:
-                _log(f"ERRO: Não foi possível extrair o router JID do target {target}")
-                router_jid = target  # Fallback para o comportamento antigo se o nome for inesperado
+                _log(f"ERROR: Could not extract router JID from target {target}")
+                router_jid = target
+            
+            # Check for incoming messages (account suspension/blocking)
+            msg = await self.receive(timeout=0.1)
+            if msg:
+                body = msg.body.lower()
+                if "suspend" in body or "block" in body or "banned" in body:
+                    # High-intensity attackers (7+) may ignore bans (APT behavior)
+                    # Low-intensity attackers always stop when caught
+                    if intensity < 7:
+                        _log(f"[!] ATTACK STOPPED: Account suspended/blocked - {msg.body}")
+                        self.blocked = True
+                        self.kill()
+                        return
+                    else:
+                        # APT: Acknowledge detection but continue with stealth techniques
+                        _log(f"[APT] Detected and banned, but continuing attack with evasion techniques - {msg.body}")
+                        # Continue attacking (simulates using alternate credentials/methods)
 
-                # A mensagem é enviada PARA O ROUTER, com o nó como destino final
-            msg = Message(to=router_jid)
-            msg.set_metadata("dst", target)
-            msg.set_metadata("protocol", "attack")
-            task_data = {
-                "cpu_load": phase * 8.0,  # Escalating load: 8%, 16%, 24%
-                "duration": 5.0
-            }
-            msg.set_metadata("task", json.dumps(task_data))
-            msg.body = msg_body
-            await self.send(msg)
+            # Phase escalation logic
+            if self.attempt_count < 5:
+                # Phase 1: Failed login attempts (passive probing)
+                if self.phase != 1:
+                    self.phase = 1
+                    _log("Phase 1: Failed login attempts (probing)")
+                
+                msg = Message(to=router_jid)
+                msg.set_metadata("dst", target)
+                msg.set_metadata("protocol", "attack")
+                msg.set_metadata("attacker_intensity", str(intensity))
+                msg.set_metadata("original_sender", str(self.agent.jid))
+                task_data = {"cpu_load": 8.0, "duration": 5.0}
+                msg.set_metadata("task", json.dumps(task_data))
+                msg.body = f"ATTACK: Failed login attempt for admin user (try #{self.attempt_count + 1}) on TARGET:{target}"
+                await self.send(msg)
+                phase = 1
+                
+            elif self.attempt_count < 10:
+                # Phase 2: Data Exfiltration (REACTIVE - bandwidth overhead!)
+                if self.phase != 2:
+                    self.phase = 2
+                    _log(f"[!] Phase 2: DATA EXFILTRATION (intensity={intensity} -> +{intensity*5}% bandwidth)")
+                
+                msg = Message(to=router_jid)
+                msg.set_metadata("dst", target)
+                msg.set_metadata("protocol", "attack")
+                msg.set_metadata("attacker_intensity", str(intensity))
+                msg.set_metadata("original_sender", str(self.agent.jid))
+                msg.body = f"DATA_EXFILTRATION:sensitive_data (intensity={intensity}) TARGET:{target}"
+                await self.send(msg)
+                phase = 2
+                
+            else:
+                # Phase 3: Backdoor Installation (REACTIVE - lateral movement!)
+                if self.phase != 3:
+                    self.phase = 3
+                    _log(f"[!!] Phase 3: BACKDOOR INSTALLATION (intensity={intensity} -> lateral spread enabled)")
+                
+                msg = Message(to=router_jid)
+                msg.set_metadata("dst", target)
+                msg.set_metadata("protocol", "attack")
+                msg.set_metadata("attacker_intensity", str(intensity))
+                msg.set_metadata("original_sender", str(self.agent.jid))
+                msg.body = f"BACKDOOR_INSTALL:insider_backdoor (intensity={intensity}) TARGET:{target}"
+                await self.send(msg)
+                phase = 3
 
-            _log(f"→ {target}: Phase {phase} - {msg_body[:60]}...")
+            _log(f"-> {target}: Phase {phase} - attempt #{self.attempt_count + 1}")
 
             self.attempt_count += 1
 
@@ -137,7 +170,7 @@ class InsiderAttacker(Agent):
         duration = int(self.get("duration") or 40)
         max_attempts = duration // 3
         _log(f"Attack duration: {duration}s (~{max_attempts} attempts)")
-        _log("Escalation plan: 5 failed logins → 5 unauthorized access → persistent exfiltration")
+        _log("Escalation plan: 5 failed logins -> 5 unauthorized access -> persistent exfiltration")
 
 
 async def main():

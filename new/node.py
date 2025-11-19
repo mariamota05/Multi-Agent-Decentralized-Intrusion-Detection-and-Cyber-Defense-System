@@ -38,10 +38,75 @@ def _log(agent_type: str, jid: str, msg: str) -> None:
 class NodeAgent(Agent):
     """An agent that listens/responds to messages and simulates a computer node."""
 
+    class LateralMovementBehaviour(PeriodicBehaviour):
+        """
+        INSIDER THREAT: Lateral Movement
+        Runs when node is compromised by insider attack.
+        Spreads backdoor to peer nodes in the subnet.
+        """
+        async def run(self):
+            # Stop if node is cleaned
+            if not self.agent.get("compromised"):
+                self.kill()
+                return
+
+            router = self.agent.get("router")
+            if not router:
+                return
+
+            # Get peers in the same subnet
+            subnet_peers = self.agent.get("subnet_peers") or []
+            if not subnet_peers:
+                return
+
+            # Probabilistic lateral spread based on attacker skill
+            intensity = self.agent.get("compromised_intensity") or 6
+            spread_success_rate = min(95, intensity * 10)  # 10% at intensity=1, 95% at intensity=9+
+            
+            import random
+            if random.randint(1, 100) > spread_success_rate:
+                # Failed to spread - insufficient privileges, detected by local security, etc.
+                _log("NodeAgent", str(self.agent.jid),
+                     f"[SPREAD FAILED] Lateral movement blocked (success rate: {spread_success_rate}%)")
+                return
+
+            # Filter out already compromised targets
+            compromised_by_me = self.agent.get("infected_peers") or set()
+            available_targets = [p for p in subnet_peers if p not in compromised_by_me]
+            
+            if not available_targets:
+                # All peers already compromised
+                return
+
+            # Pick target(s) based on intensity
+            targets_count = 1 if intensity < 7 else min(2, len(available_targets))
+            
+            import random
+            targets = random.sample(available_targets, min(targets_count, len(available_targets)))
+            
+            for target in targets:
+                # Send lateral spread message
+                msg = Message(to=router)
+                msg.set_metadata("dst", target)
+                msg.set_metadata("protocol", "attack")
+                msg.set_metadata("spread_intensity", str(intensity))
+                
+                backdoor_type = self.agent.get("backdoor_type") or "insider_backdoor"
+                msg.body = f"LATERAL_SPREAD:{backdoor_type}"
+                
+                await self.send(msg)
+                
+                # Track who we've infected
+                compromised_by_me.add(target)
+                self.agent.set("infected_peers", compromised_by_me)
+                
+                _log("NodeAgent", str(self.agent.jid),
+                     f"[SPREAD] Lateral movement to {target} (intensity={intensity})")
+
     class WormPropagationBehav(PeriodicBehaviour):
         """
-        WORM BEHAVIOUR
-        Corre apenas se o nó estiver infetado.
+        MALWARE: WORM BEHAVIOUR
+        Corre apenas se o nó estiver infetado com malware.
         Tenta espalhar a carga (ataque) para vizinhos de forma furtiva.
         """
         async def run(self):
@@ -222,6 +287,82 @@ class NodeAgent(Agent):
                         _log("NodeAgent", str(self.agent.jid), 
                              f"INFECT message received but protocol={protocol} (expected 'malware-infection')")
 
+                elif body_text.startswith("DATA_EXFILTRATION:"):
+                    # INSIDER THREAT Phase 2: Data Exfiltration (bandwidth overhead)
+                    already_exfiltrating = self.agent.get("exfiltration_active") or False
+                    if not already_exfiltrating:
+                        attacker_intensity = int(msg.get_metadata("attacker_intensity") or 6)
+                        exfiltration_source = msg.get_metadata("original_sender") or str(msg.sender)
+                        bw_overhead = attacker_intensity * 5.0
+                        
+                        self.agent.set("exfiltration_active", True)
+                        self.agent.set("exfiltration_bandwidth", bw_overhead)
+                        self.agent.set("exfiltration_source", exfiltration_source)
+                        
+                        _log("NodeAgent", str(self.agent.jid),
+                             f"[!] DATA EXFILTRATION STARTED: +{bw_overhead:.0f}% bandwidth overhead (intensity={attacker_intensity})")
+
+                elif body_text.startswith("BACKDOOR_INSTALL:"):
+                    # INSIDER THREAT Phase 3: Backdoor Installation (enables lateral movement)
+                    already_compromised = self.agent.get("compromised") or False
+                    if not already_compromised:
+                        backdoor_type = body_text.split("BACKDOOR_INSTALL:", 1)[1].strip()
+                        attacker_intensity = int(msg.get_metadata("attacker_intensity") or 6)
+                        compromised_by = msg.get_metadata("original_sender") or str(msg.sender)
+                        
+                        self.agent.set("compromised", True)
+                        self.agent.set("backdoor_type", backdoor_type)
+                        self.agent.set("compromised_by", compromised_by)
+                        self.agent.set("compromised_intensity", attacker_intensity)
+                        
+                        _log("NodeAgent", str(self.agent.jid),
+                             f"[!!] BACKDOOR INSTALLED: {backdoor_type} (intensity={attacker_intensity}) - Lateral movement enabled")
+                        
+                        # Start lateral movement behavior
+                        spread_period = max(5.0, 30.0 - (attacker_intensity * 2.5))
+                        lateral_behav = self.agent.LateralMovementBehaviour(period=spread_period)
+                        self.agent.add_behaviour(lateral_behav)
+                        self.agent.set("lateral_movement_active", True)
+                        
+                        _log("NodeAgent", str(self.agent.jid),
+                             f"Lateral movement period: {spread_period:.1f}s (will spread to subnet peers)")
+
+                elif body_text.startswith("LATERAL_SPREAD:"):
+                    # INSIDER THREAT: Lateral spread from compromised peer (trusted source)
+                    already_compromised = self.agent.get("compromised") or False
+                    if not already_compromised:
+                        backdoor_type = body_text.split("LATERAL_SPREAD:", 1)[1].strip()
+                        source_node = str(msg.sender)
+                        attacker_intensity = int(msg.get_metadata("spread_intensity") or 7)
+                        
+                        # Probabilistic lateral infection success (network security, endpoint protection, etc.)
+                        import random
+                        infection_success_rate = min(90, 40 + (attacker_intensity * 5))  # 45% to 90%
+                        
+                        if random.randint(1, 100) > infection_success_rate:
+                            _log("NodeAgent", str(self.agent.jid),
+                                 f"[BLOCKED] Lateral infection attempt from {source_node} blocked by local security ({infection_success_rate}% success rate)")
+                            return
+                        
+                        self.agent.set("compromised", True)
+                        self.agent.set("backdoor_type", backdoor_type)
+                        self.agent.set("compromised_by", source_node)
+                        self.agent.set("compromised_intensity", attacker_intensity)
+                        
+                        # Also start exfiltration
+                        bw_overhead = attacker_intensity * 5.0
+                        self.agent.set("exfiltration_active", True)
+                        self.agent.set("exfiltration_bandwidth", bw_overhead)
+                        
+                        _log("NodeAgent", str(self.agent.jid),
+                             f"[!!] LATERAL INFECTION from {source_node}: {backdoor_type} installed")
+                        
+                        # Start lateral movement to continue spreading
+                        spread_period = max(5.0, 30.0 - (attacker_intensity * 2.5))
+                        lateral_behav = self.agent.LateralMovementBehaviour(period=spread_period)
+                        self.agent.add_behaviour(lateral_behav)
+                        self.agent.set("lateral_movement_active", True)
+
                 elif body_text.startswith(("BLOCK_JID:", "RATE_LIMIT:", "TEMP_BLOCK:", "SUSPEND_ACCESS:")):
                     # Comandos da Firewall/Resposta
                     if fw:
@@ -272,6 +413,42 @@ class NodeAgent(Agent):
                                  f"[FAIL] HARD RESET FAILED: {malware_type} has advanced persistence mechanisms (rootkit/firmware)")
                     else:
                         _log("NodeAgent", str(self.agent.jid), "Not infected, hard reset command ignored")
+
+                elif body_text.startswith("FORENSIC_CLEAN"):
+                    # FORENSIC CLEAN: Probabilistic insider threat removal based on intensity
+                    is_compromised = self.agent.get("compromised") or False
+                    if is_compromised:
+                        intensity = self.agent.get("compromised_intensity") or 6
+                        backdoor_type = self.agent.get("backdoor_type") or "unknown_backdoor"
+                        
+                        # Calculate clean success rate: 100 - (intensity × 6) → 40% to 94%
+                        base_success = 100 - (intensity * 6)
+                        clean_success_rate = max(40, min(95, base_success))
+                        
+                        _log("NodeAgent", str(self.agent.jid),
+                             f"FORENSIC CLEAN INITIATED: Attempting to remove {backdoor_type} (intensity={intensity}, success_rate={clean_success_rate:.0f}%)")
+                        
+                        import random
+                        if random.random() * 100 < clean_success_rate:
+                            # SUCCESS: Remove backdoor and exfiltration
+                            self.agent.set("compromised", False)
+                            self.agent.set("backdoor_type", None)
+                            self.agent.set("compromised_by", None)
+                            self.agent.set("compromised_intensity", None)
+                            self.agent.set("exfiltration_active", False)
+                            self.agent.set("exfiltration_bandwidth", 0.0)
+                            self.agent.set("exfiltration_source", None)
+                            self.agent.set("lateral_movement_active", False)
+                            self.agent.set("infected_peers", set())
+                            
+                            _log("NodeAgent", str(self.agent.jid),
+                                 f"[OK] FORENSIC CLEAN COMPLETE: {backdoor_type} removed, exfiltration stopped, system restored")
+                        else:
+                            # FAILURE: Backdoor persists
+                            _log("NodeAgent", str(self.agent.jid),
+                                 f"[FAIL] FORENSIC CLEAN FAILED: {backdoor_type} has rootkit-level persistence")
+                    else:
+                        _log("NodeAgent", str(self.agent.jid), "Not compromised, forensic clean command ignored")
 
                 elif body_text.upper() == "PING":
                     # MÉTRICA: Serviço Legítimo
@@ -344,8 +521,11 @@ class NodeAgent(Agent):
             except:
                  base_bw = 5.0
 
+            # Add exfiltration bandwidth overhead (insider threat Phase 2)
+            exfiltration_bw = float(self.agent.get("exfiltration_bandwidth") or 0.0)
+
             self.agent.set("cpu_usage", cpu_usage)
-            self.agent.set("bandwidth_usage", min(100.0, base_bw + extra_cpu * 0.2))
+            self.agent.set("bandwidth_usage", min(100.0, base_bw + extra_cpu * 0.2 + exfiltration_bw))
             current_peak = self.agent.get("cpu_peak") or 0.0
             if cpu_usage > current_peak:
                 self.agent.set("cpu_peak", cpu_usage)
@@ -451,7 +631,8 @@ class NodeAgent(Agent):
                     pass
 
             if cpu_usage > 15.0:
-                _log("NodeAgent", str(self.agent.jid), f"Load: CPU={cpu_usage:.1f}% (Infected={self.agent.get('is_infected')})")
+                bw_usage = self.agent.get("bandwidth_usage") or 0.0
+                _log("NodeAgent", str(self.agent.jid), f"Load: CPU={cpu_usage:.1f}% BW={bw_usage:.1f}% (Infected={self.agent.get('is_infected')})")
 
             # Check if immediate CPU check was requested (task just added)
             immediate_check = self.agent.get("immediate_cpu_check") or False
@@ -476,6 +657,11 @@ class NodeAgent(Agent):
         self.set("base_bw", 5.0)
         self.set("active_tasks", {})
         self.set("self_isolated", False)
+        
+        # Insider threat state
+        self.set("compromised", False)
+        self.set("exfiltration_active", False)
+        self.set("exfiltration_bandwidth", 0.0)
 
         fw = FirewallBehaviour()
         self.add_behaviour(fw)

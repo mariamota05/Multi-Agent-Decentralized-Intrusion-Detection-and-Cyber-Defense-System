@@ -216,6 +216,7 @@ class RouterAgent(Agent):
             # Check if this is a threat alert from a node firewall
             if protocol == "threat-alert":
                 _log("Router", str(self.agent.jid), f"Threat alert received: {msg.body}")
+                
                 # Forward to monitors
                 monitors = self.agent.get("monitor_jids") or []
                 for monitor_jid in monitors:
@@ -299,6 +300,12 @@ class RouterAgent(Agent):
                     "original_sender": original_sender,
                     "original_destination": dst
                 }
+                
+                # Preserve important attack metadata for monitoring
+                if msg.metadata:
+                    for key in ["attacker_intensity", "task", "spread_intensity"]:
+                        if key in msg.metadata:
+                            copy_metadata[key] = msg.get_metadata(key)
 
                 if fw:
                     await fw.send_through_firewall(m, copy_body, metadata=copy_metadata)

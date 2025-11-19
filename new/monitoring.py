@@ -118,6 +118,8 @@ class MonitoringAgent(Agent):
             accept.set_metadata("offender_jid", incident["offender_jid"])
             # CORREÇÃO: Passar a vítima para o vencedor
             accept.set_metadata("victim_jid", incident["victim_jid"])
+            # Pass intensity for probabilistic mitigation
+            accept.set_metadata("intensity", str(incident.get("intensity", 5)))
 
             accept.body = f"Contract awarded for incident {incident_id}"
             await self.send(accept)
@@ -161,7 +163,8 @@ class MonitoringAgent(Agent):
                 "malware", "virus", "exploit", "trojan", "worm", "ransomware",
             ]
             self.low_priority_keywords = [
-                "failed login", "failed_login", "unauthorized",
+                "failed login", "failed_login", "unauthorized", 
+                "exfiltration", "data_exfiltration", "backdoor", "lateral",
             ]
 
         async def on_start(self):
@@ -181,12 +184,16 @@ class MonitoringAgent(Agent):
             _log("MonitoringAgent", str(self.agent.jid),
                  f"Starting CNP auction for incident {incident_id}: {threat_type} from {offender_jid} targeting {victim_str}")
 
+            # Extract intensity from alert
+            intensity_value = alert.get("intensity", 5)
+
             pending = self.agent.get("pending_cfps") or {}
             pending[incident_id] = {
                 "threat_type": threat_type,
                 "offender_jid": offender_jid,
                 "victim_jid": victim_str,
                 "alert": alert,
+                "intensity": intensity_value,
                 "proposals": [],
                 "status": "waiting",
                 "deadline": asyncio.get_event_loop().time() + 2.0,
@@ -299,17 +306,41 @@ class MonitoringAgent(Agent):
                     pass
 
             if suspicious:
+                # Probabilistic detection - sophisticated attackers may evade detection
+                import random
+                
+                # Extract attacker intensity to adjust detection probability
+                attacker_intensity = msg.get_metadata("attacker_intensity")
+                intensity_value = int(attacker_intensity) if attacker_intensity else 5
+                
+                # Calculate detection probability based on threat indicators AND attacker skill
+                # More reasons = higher detection, higher intensity = lower detection
+                base_detection_rate = 60  # Base 60% chance
+                detection_bonus = len(reasons) * 15  # +15% per reason
+                intensity_penalty = intensity_value * 5  # -5% per intensity level
+                detection_rate = min(95, max(20, base_detection_rate + detection_bonus - intensity_penalty))
+                
+                if random.randint(1, 100) > detection_rate:
+                    _log("MonitoringAgent", str(self.agent.jid),
+                         f"[DETECTION EVADED] Sophisticated attacker evaded detection - {sender} (intensity={intensity_value}, detection rate: {detection_rate}%)")
+                    return  # Attack not detected this time
+                
                 if sender not in self.alerted_senders:
                     self.alerted_senders[sender] = now + 15.0
                 else:
                     return
+
+                # Extract intensity from message metadata if available
+                attacker_intensity = msg.get_metadata("attacker_intensity")
+                intensity_value = int(attacker_intensity) if attacker_intensity else 5
 
                 alert = {
                     "time": datetime.datetime.now().isoformat(),
                     "sender": sender,
                     "body": body,
                     "reasons": reasons,
-                    "victim": victim_jid
+                    "victim": victim_jid,
+                    "intensity": intensity_value
                 }
                 _log("MonitoringAgent", str(self.agent.jid), f"[ALERT] {alert}")
 
