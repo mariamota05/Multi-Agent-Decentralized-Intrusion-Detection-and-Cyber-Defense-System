@@ -1,4 +1,4 @@
-## 🛡️ Self-Healing Multi-Agent Network Security Simulation
+##  Self-Healing Multi-Agent Network Security Simulation
 
 This project implements a scalable, distributed network environment using the **SPADE** framework for simulating a self-healing security system. The system uses a network of **Nodes**, **Routers**, **Monitoring Agents**, and **Incident Response Agents** that employ the **Contract Net Protocol (CNP)** to autonomously detect, bid on, and mitigate cyber threats.
 
@@ -6,7 +6,7 @@ The environment is designed to stress-test decentralized security measures again
 
 ---
 
-## 💻 Project Structure
+##  Project Structure
 
 The core logic of the multi-agent system is organized as follows:
 
@@ -22,7 +22,7 @@ The core logic of the multi-agent system is organized as follows:
 
 ---
 
-## 🔥 Attack Scenarios
+##  Attack Scenarios
 
 The simulation tests the CNP-based security response against three primary threats:
 
@@ -35,7 +35,7 @@ The simulation tests the CNP-based security response against three primary threa
 
 ---
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### Prerequisites
 
